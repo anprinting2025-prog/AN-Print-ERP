@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <script>
+      // Suppress Vite HMR WebSocket connection errors in iframe environment
+      (function() {
+        const isWsError = (msg) => {
+          if (!msg) return false;
+          const str = typeof msg === 'string' ? msg : (msg.message || msg.reason?.message || String(msg));
+          return str.includes('WebSocket') || str.includes('@vite/client') || str.includes('connection lost');
+        };
+
+        window.addEventListener('error', function (event) {
+          if (event && (isWsError(event.message) || isWsError(event.error) || (event.target && event.target.constructor && event.target.constructor.name === 'WebSocket'))) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+            return true;
+          }
+        }, true);
+
+        window.addEventListener('unhandledrejection', function (event) {
+          if (event && isWsError(event.reason)) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+          }
+        }, true);
+
+        const origOnError = window.onerror;
+        window.onerror = function (msg, url, line, col, error) {
+          if (isWsError(msg) || isWsError(error) || (url && url.includes('@vite/client'))) {
+            return true;
+          }
+          if (origOnError) return origOnError.apply(this, arguments);
+        };
+      })();
+    </script>
+    <script>
+      // Apply persisted theme before initial paint to prevent theme flash
+      try {
+        const savedTheme = localStorage.getItem('an_erp_theme');
+        if (savedTheme === 'dark' || (!savedTheme && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+          document.documentElement.classList.add('dark');
+          document.documentElement.style.colorScheme = 'dark';
+        } else {
+          document.documentElement.classList.remove('dark');
+          document.documentElement.style.colorScheme = 'light';
+        }
+      } catch (e) {}
+    </script>
+    <title>An Printing ERP — Bag Printing Management System</title>
+    <meta name="description" content="Comprehensive business management system for An Printing (Algeria) — specializing in plastic, carton, and TNT bag printing, inventory tracking, production, orders, debts, and financial reports." />
+    <meta property="og:title" content="An Printing ERP — Bag Printing Management System" />
+    <meta property="og:description" content="Comprehensive business management system for An Printing (Algeria) — specializing in plastic, carton, and TNT bag printing, inventory tracking, production, orders, debts, and financial reports." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <!-- Mobile Web App & PWA Settings -->
+    <meta name="theme-color" content="#4f46e5" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="AnPrinting" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  </head>
+  <body class="bg-slate-50 text-slate-900 antialiased selection:bg-indigo-500 selection:text-white overscroll-none">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

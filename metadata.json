@@ -1,0 +1,6 @@
+{
+  "name": "An Printing ERP",
+  "description": "Comprehensive business management system for An Printing (Algeria) — specializing in plastic, carton, and TNT bag printing, inventory tracking, production, orders, debts, and financial reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
