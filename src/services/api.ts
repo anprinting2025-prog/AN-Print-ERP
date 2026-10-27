@@ -564,6 +564,29 @@ export const api = {
     }
     return res.json();
   },
+  async updatePayment(id: string, data: any, token?: string | null): Promise<Payment> {
+    const res = await fetch(`/api/payments/${id}`, {
+      method: 'PUT',
+      headers: getHeaders(token),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to update payment');
+    }
+    return res.json();
+  },
+  async deletePayment(id: string, token?: string | null): Promise<{ success: boolean; message?: string }> {
+    const res = await fetch(`/api/payments/${id}`, {
+      method: 'DELETE',
+      headers: getHeaders(token),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to delete payment');
+    }
+    return res.json();
+  },
 
   // Expenses
   async getExpenseCategories(): Promise<ExpenseCategory[]> {

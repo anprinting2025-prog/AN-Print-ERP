@@ -15,6 +15,9 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   CheckCircle,
+  Pencil,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 
 export const PaymentsView: React.FC = () => {
@@ -32,9 +35,18 @@ export const PaymentsView: React.FC = () => {
 
   // Modals
   const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState<boolean>(false);
   const [receiptToPrint, setReceiptToPrint] = useState<Payment | null>(null);
 
-  // Form State
+  // Selected payment for edit / delete
+  const [editingPayment, setEditingPayment] = useState<Payment | null>(null);
+  const [deletingPayment, setDeletingPayment] = useState<Payment | null>(null);
+
+  // Action error message
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Add Form State
   const [paymentType, setPaymentType] = useState<'customer_receipt' | 'supplier_payment'>('customer_receipt');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
   const [selectedSupplierId, setSelectedSupplierId] = useState<string>('');
@@ -45,6 +57,18 @@ export const PaymentsView: React.FC = () => {
   const [paymentDate, setPaymentDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [referenceNumber, setReferenceNumber] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
+
+  // Edit Form State
+  const [editPaymentType, setEditPaymentType] = useState<'customer_receipt' | 'supplier_payment'>('customer_receipt');
+  const [editCustomerId, setEditCustomerId] = useState<string>('');
+  const [editSupplierId, setEditSupplierId] = useState<string>('');
+  const [editOrderId, setEditOrderId] = useState<string>('');
+  const [editPurchaseId, setEditPurchaseId] = useState<string>('');
+  const [editAmountDzd, setEditAmountDzd] = useState<string>('');
+  const [editPaymentMethod, setEditPaymentMethod] = useState<'cash' | 'bank_transfer' | 'check' | 'other'>('cash');
+  const [editPaymentDate, setEditPaymentDate] = useState<string>('');
+  const [editReferenceNumber, setEditReferenceNumber] = useState<string>('');
+  const [editNotes, setEditNotes] = useState<string>('');
 
   const loadData = async () => {
     try {
@@ -73,6 +97,7 @@ export const PaymentsView: React.FC = () => {
   }, []);
 
   const handleOpenAdd = (type: 'customer_receipt' | 'supplier_payment') => {
+    setActionError(null);
     setPaymentType(type);
     if (type === 'customer_receipt') {
       setSelectedCustomerId(customers.length > 0 ? customers[0].id : '');
@@ -92,6 +117,7 @@ export const PaymentsView: React.FC = () => {
   const handleSubmitPayment = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      setActionError(null);
       await api.recordPayment(
         {
           paymentDate,
@@ -110,7 +136,74 @@ export const PaymentsView: React.FC = () => {
       setIsAddModalOpen(false);
       loadData();
     } catch (err: any) {
-      alert(err.message || 'Error recording payment');
+      setActionError(err.message || 'Error recording payment');
+    }
+  };
+
+  const handleOpenEdit = (p: Payment) => {
+    setActionError(null);
+    setEditingPayment(p);
+    setEditPaymentType(p.paymentType as 'customer_receipt' | 'supplier_payment');
+    setEditCustomerId(p.customerId || '');
+    setEditSupplierId(p.supplierId || '');
+
+    const alloc = p.allocations && p.allocations.length > 0 ? p.allocations[0] : null;
+    setEditOrderId(alloc?.orderId || '');
+    setEditPurchaseId(alloc?.purchaseId || '');
+
+    setEditAmountDzd(p.amountDzd);
+    setEditPaymentMethod(p.paymentMethod as any);
+    setEditPaymentDate(p.paymentDate || new Date().toISOString().split('T')[0]);
+    setEditReferenceNumber(p.referenceNumber || '');
+    setEditNotes(p.notes || '');
+    setIsEditModalOpen(true);
+  };
+
+  const handleUpdatePayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingPayment) return;
+    try {
+      setActionError(null);
+      await api.updatePayment(
+        editingPayment.id,
+        {
+          paymentDate: editPaymentDate,
+          paymentType: editPaymentType,
+          customerId: editPaymentType === 'customer_receipt' ? editCustomerId || null : null,
+          supplierId: editPaymentType === 'supplier_payment' ? editSupplierId || null : null,
+          orderId: editPaymentType === 'customer_receipt' ? editOrderId || null : null,
+          purchaseId: editPaymentType === 'supplier_payment' ? editPurchaseId || null : null,
+          amountDzd: editAmountDzd,
+          paymentMethod: editPaymentMethod,
+          referenceNumber: editReferenceNumber,
+          notes: editNotes,
+        },
+        token
+      );
+      setIsEditModalOpen(false);
+      setEditingPayment(null);
+      loadData();
+    } catch (err: any) {
+      setActionError(err.message || 'Error updating payment');
+    }
+  };
+
+  const handleOpenDelete = (p: Payment) => {
+    setActionError(null);
+    setDeletingPayment(p);
+    setIsDeleteModalOpen(true);
+  };
+
+  const handleDeletePayment = async () => {
+    if (!deletingPayment) return;
+    try {
+      setActionError(null);
+      await api.deletePayment(deletingPayment.id, token);
+      setIsDeleteModalOpen(false);
+      setDeletingPayment(null);
+      loadData();
+    } catch (err: any) {
+      setActionError(err.message || 'Error deleting payment');
     }
   };
 
@@ -123,7 +216,7 @@ export const PaymentsView: React.FC = () => {
     return matchSearch && matchType;
   });
 
-  // Candidate unpaid orders or purchases for allocation
+  // Candidate unpaid orders or purchases for allocation (Add modal)
   const candidateOrders = orders.filter(
     (o) =>
       (!selectedCustomerId || o.customerId === selectedCustomerId) &&
@@ -133,6 +226,18 @@ export const PaymentsView: React.FC = () => {
     (p) =>
       (!selectedSupplierId || p.supplierId === selectedSupplierId) &&
       p.paymentStatus !== 'paid'
+  );
+
+  // Candidate orders or purchases for allocation (Edit modal)
+  const candidateEditOrders = orders.filter(
+    (o) =>
+      (!editCustomerId || o.customerId === editCustomerId) &&
+      ((o.remainingBalance || 0) > 0 || o.id === editOrderId)
+  );
+  const candidateEditPurchases = purchases.filter(
+    (p) =>
+      (!editSupplierId || p.supplierId === editSupplierId) &&
+      (p.paymentStatus !== 'paid' || p.id === editPurchaseId)
   );
 
   return (
@@ -257,12 +362,29 @@ export const PaymentsView: React.FC = () => {
                       : 'Account balance'}
                   </span>
 
-                  <button
-                    onClick={() => setReceiptToPrint(p)}
-                    className="rounded-lg bg-slate-50 border border-slate-200 px-2.5 py-1 text-xs font-bold text-slate-700 hover:bg-slate-100 flex items-center gap-1 shadow-xs"
-                  >
-                    <Printer className="h-3 w-3 text-indigo-600" /> Receipt
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => setReceiptToPrint(p)}
+                      className="rounded-lg bg-slate-50 border border-slate-200 p-1.5 text-xs font-bold text-slate-700 hover:bg-slate-100 flex items-center gap-1 shadow-xs"
+                      title="Print receipt"
+                    >
+                      <Printer className="h-3.5 w-3.5 text-indigo-600" />
+                    </button>
+                    <button
+                      onClick={() => handleOpenEdit(p)}
+                      className="rounded-lg bg-slate-50 border border-slate-200 p-1.5 text-xs font-bold text-slate-700 hover:bg-slate-100 hover:text-amber-600 flex items-center gap-1 shadow-xs"
+                      title="Edit payment"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleOpenDelete(p)}
+                      className="rounded-lg bg-slate-50 border border-slate-200 p-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 flex items-center gap-1 shadow-xs"
+                      title="Delete payment"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -287,7 +409,7 @@ export const PaymentsView: React.FC = () => {
                 <th className="py-3 px-4">Method</th>
                 <th className="py-3 px-4">Reference #</th>
                 <th className="py-3 px-4">Allocated Invoice</th>
-                <th className="py-3 px-4 text-center">Receipt</th>
+                <th className="py-3 px-4 text-center">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-slate-700">
@@ -327,13 +449,29 @@ export const PaymentsView: React.FC = () => {
                         )}
                       </td>
                       <td className="py-3.5 px-4 text-center">
-                        <button
-                          onClick={() => setReceiptToPrint(p)}
-                          className="rounded border border-slate-200 bg-white p-1 text-slate-600 hover:text-indigo-600 hover:bg-slate-50 shadow-xs"
-                          title="Print official payment receipt"
-                        >
-                          <Printer className="h-3.5 w-3.5" />
-                        </button>
+                        <div className="flex items-center justify-center gap-1.5">
+                          <button
+                            onClick={() => setReceiptToPrint(p)}
+                            className="rounded border border-slate-200 bg-white p-1 text-slate-600 hover:text-indigo-600 hover:bg-slate-50 shadow-xs"
+                            title="Print official payment receipt"
+                          >
+                            <Printer className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleOpenEdit(p)}
+                            className="rounded border border-slate-200 bg-white p-1 text-slate-600 hover:text-amber-600 hover:bg-amber-50 shadow-xs"
+                            title="Edit payment"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleOpenDelete(p)}
+                            className="rounded border border-slate-200 bg-white p-1 text-rose-600 hover:text-rose-700 hover:bg-rose-50 shadow-xs"
+                            title="Delete payment"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -358,6 +496,12 @@ export const PaymentsView: React.FC = () => {
         maxWidth="lg"
       >
         <form onSubmit={handleSubmitPayment} className="space-y-4">
+          {actionError && (
+            <div className="rounded-lg bg-rose-50 border border-rose-200 p-3 text-xs text-rose-700 font-semibold">
+              {actionError}
+            </div>
+          )}
+
           <div className="flex rounded-lg bg-slate-100 p-1">
             <button
               type="button"
@@ -541,6 +685,244 @@ export const PaymentsView: React.FC = () => {
         </form>
       </Modal>
 
+      {/* Edit Payment Modal */}
+      <Modal
+        isOpen={isEditModalOpen}
+        onClose={() => setIsEditModalOpen(false)}
+        title={`Edit Payment ${editingPayment?.paymentNumber || ''}`}
+        maxWidth="lg"
+      >
+        <form onSubmit={handleUpdatePayment} className="space-y-4">
+          {actionError && (
+            <div className="rounded-lg bg-rose-50 border border-rose-200 p-3 text-xs text-rose-700 font-semibold">
+              {actionError}
+            </div>
+          )}
+
+          <div className="flex rounded-lg bg-slate-100 p-1">
+            <button
+              type="button"
+              onClick={() => setEditPaymentType('customer_receipt')}
+              className={`flex-1 rounded-md py-1.5 text-xs font-semibold transition ${
+                editPaymentType === 'customer_receipt'
+                  ? 'bg-emerald-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Customer Receipt (Receivable)
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditPaymentType('supplier_payment')}
+              className={`flex-1 rounded-md py-1.5 text-xs font-semibold transition ${
+                editPaymentType === 'supplier_payment'
+                  ? 'bg-rose-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Supplier Payment (Liability)
+            </button>
+          </div>
+
+          {editPaymentType === 'customer_receipt' ? (
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Customer *</label>
+              <select
+                required
+                value={editCustomerId}
+                onChange={(e) => setEditCustomerId(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 p-2 text-xs"
+              >
+                <option value="">-- Select Customer --</option>
+                {customers.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} {c.shopName ? `(${c.shopName})` : ''} - Debt: {formatDZD(c.outstandingBalance)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Supplier *</label>
+              <select
+                required
+                value={editSupplierId}
+                onChange={(e) => setEditSupplierId(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 p-2 text-xs"
+              >
+                <option value="">-- Select Supplier --</option>
+                {suppliers.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} - Owed: {formatDZD(s.outstandingBalance)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Optional specific invoice allocation */}
+          {editPaymentType === 'customer_receipt' && candidateEditOrders.length > 0 && (
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Allocate against specific Order (Optional)
+              </label>
+              <select
+                value={editOrderId}
+                onChange={(e) => setEditOrderId(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 p-2 text-xs"
+              >
+                <option value="">-- Apply to general customer balance --</option>
+                {candidateEditOrders.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.orderNumber} (Total: {formatDZD(o.totalAmountDzd)}, Remaining: {formatDZD(o.remainingBalance)})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {editPaymentType === 'supplier_payment' && candidateEditPurchases.length > 0 && (
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Allocate against Purchase Invoice (Optional)
+              </label>
+              <select
+                value={editPurchaseId}
+                onChange={(e) => setEditPurchaseId(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 p-2 text-xs"
+              >
+                <option value="">-- Apply to general supplier balance --</option>
+                {candidateEditPurchases.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.purchaseNumber} (Invoice: {formatDZD(p.totalAmountDzd)}, Paid: {formatDZD(p.amountPaidDzd)})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Payment Amount (DZD) *</label>
+              <input
+                type="number"
+                step="0.01"
+                required
+                value={editAmountDzd}
+                onChange={(e) => setEditAmountDzd(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 p-2 text-xs font-mono font-bold"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Payment Method</label>
+              <select
+                value={editPaymentMethod}
+                onChange={(e) => setEditPaymentMethod(e.target.value as any)}
+                className="w-full rounded-lg border border-slate-300 p-2 text-xs"
+              >
+                <option value="cash">Cash (Espèces)</option>
+                <option value="bank_transfer">Bank Transfer (Virement)</option>
+                <option value="check">Check (Chèque)</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Date *</label>
+              <input
+                type="date"
+                required
+                value={editPaymentDate}
+                onChange={(e) => setEditPaymentDate(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 p-2 text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Receipt / Ref #</label>
+              <input
+                type="text"
+                value={editReferenceNumber}
+                onChange={(e) => setEditReferenceNumber(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 p-2 text-xs"
+                placeholder="e.g. REC-1029 / Chèque #8821"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Notes</label>
+            <textarea
+              rows={2}
+              value={editNotes}
+              onChange={(e) => setEditNotes(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 p-2 text-xs"
+              placeholder="e.g. Updated payment details"
+            />
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+            <button
+              type="button"
+              onClick={() => setIsEditModalOpen(false)}
+              className="px-4 py-2 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 shadow-xs"
+            >
+              Save Changes
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Delete Payment Confirmation Modal */}
+      <Modal
+        isOpen={isDeleteModalOpen}
+        onClose={() => setIsDeleteModalOpen(false)}
+        title="Confirm Payment Deletion"
+        maxWidth="md"
+      >
+        <div className="space-y-4">
+          {actionError && (
+            <div className="rounded-lg bg-rose-50 border border-rose-200 p-3 text-xs text-rose-700 font-semibold">
+              {actionError}
+            </div>
+          )}
+
+          <div className="flex items-start gap-3 rounded-xl bg-amber-50 p-4 border border-amber-200">
+            <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+            <div className="text-xs text-amber-900 space-y-1">
+              <p className="font-bold">Are you sure you want to delete this payment record?</p>
+              <p className="text-amber-700">
+                Payment <span className="font-mono font-bold">{deletingPayment?.paymentNumber}</span> ({deletingPayment?.partyName} - {formatDZD(deletingPayment?.amountDzd || '0')}) will be deleted. Any order or purchase invoice allocations will be automatically reverted and balances recalculated.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+            <button
+              type="button"
+              onClick={() => setIsDeleteModalOpen(false)}
+              className="px-4 py-2 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleDeletePayment}
+              className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 shadow-xs"
+            >
+              Delete Payment
+            </button>
+          </div>
+        </div>
+      </Modal>
+
       {/* Printable Payment Receipt Modal */}
       <Modal
         isOpen={!!receiptToPrint}
@@ -610,3 +992,4 @@ export const PaymentsView: React.FC = () => {
     </div>
   );
 };
+

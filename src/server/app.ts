@@ -4137,6 +4137,211 @@ apiApp.post('/api/payments', requireAuth, async (req: AuthRequest, res: Response
   }
 });
 
+apiApp.put('/api/payments/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const {
+      paymentDate,
+      paymentType,
+      customerId,
+      supplierId,
+      partyName,
+      amountDzd,
+      paymentMethod,
+      referenceNumber,
+      orderId,
+      purchaseId,
+      notes,
+    } = req.body;
+
+    const existing = await db.select().from(payments).where(eq(payments.id, req.params.id)).limit(1);
+    if (!existing.length) {
+      return res.status(404).json({ error: 'Paiement introuvable' });
+    }
+
+    const prevPayment = existing[0];
+    const prevAllocs = await db.select().from(paymentAllocations).where(eq(paymentAllocations.paymentId, req.params.id));
+
+    await recordUndoOperation({
+      actionType: 'update',
+      entityType: 'payment',
+      entityId: req.params.id,
+      description: `Modification du paiement ${prevPayment.paymentNumber} (${prevPayment.partyName})`,
+      snapshot: {
+        payment: prevPayment,
+        allocations: prevAllocs,
+      },
+      req,
+    });
+
+    for (const alloc of prevAllocs) {
+      const allocAmt = parseFloat(alloc.allocatedAmountDzd || '0');
+      if (alloc.orderId) {
+        const ord = await db.select().from(orders).where(eq(orders.id, alloc.orderId)).limit(1);
+        if (ord.length) {
+          const currentPaid = parseFloat(ord[0].amountPaidDzd || '0');
+          const newPaid = Math.max(0, currentPaid - allocAmt);
+          await db.update(orders).set({ amountPaidDzd: String(newPaid) }).where(eq(orders.id, alloc.orderId));
+        }
+      }
+      if (alloc.purchaseId) {
+        const purch = await db.select().from(purchases).where(eq(purchases.id, alloc.purchaseId)).limit(1);
+        if (purch.length) {
+          const currentPaid = parseFloat(purch[0].amountPaidDzd || '0');
+          const totalAmt = parseFloat(purch[0].totalAmountDzd || '0');
+          const newPaid = Math.max(0, currentPaid - allocAmt);
+          const newStatus = newPaid <= 0 ? 'unpaid' : newPaid < totalAmt ? 'partial' : 'paid';
+          await db.update(purchases).set({ amountPaidDzd: String(newPaid), paymentStatus: newStatus }).where(eq(purchases.id, alloc.purchaseId));
+        }
+      }
+    }
+
+    await db.delete(paymentAllocations).where(eq(paymentAllocations.paymentId, req.params.id));
+
+    const effectiveType = paymentType || prevPayment.paymentType;
+    let resolvedParty = partyName || prevPayment.partyName;
+
+    if (effectiveType === 'customer_receipt' && customerId) {
+      const cust = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
+      if (cust.length) resolvedParty = cust[0].name;
+    } else if (effectiveType === 'supplier_payment' && supplierId) {
+      const supp = await db.select().from(suppliers).where(eq(suppliers.id, supplierId)).limit(1);
+      if (supp.length) resolvedParty = supp[0].name;
+    }
+
+    const amount = amountDzd !== undefined ? parseFloat(amountDzd || '0') : parseFloat(prevPayment.amountDzd || '0');
+
+    const updatedPayment = await db
+      .update(payments)
+      .set({
+        paymentDate: paymentDate || prevPayment.paymentDate,
+        paymentType: effectiveType,
+        customerId: customerId !== undefined ? (customerId || null) : prevPayment.customerId,
+        supplierId: supplierId !== undefined ? (supplierId || null) : prevPayment.supplierId,
+        partyName: resolvedParty,
+        amountDzd: String(amount),
+        paymentMethod: paymentMethod || prevPayment.paymentMethod,
+        referenceNumber: referenceNumber !== undefined ? referenceNumber : prevPayment.referenceNumber,
+        notes: notes !== undefined ? notes : prevPayment.notes,
+      })
+      .where(eq(payments.id, req.params.id))
+      .returning();
+
+    if (effectiveType === 'customer_receipt' && orderId) {
+      const targetOrder = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+      if (targetOrder.length) {
+        const currentPaid = parseFloat(targetOrder[0].amountPaidDzd || '0');
+        const newPaid = currentPaid + amount;
+        await db.update(orders).set({ amountPaidDzd: String(newPaid) }).where(eq(orders.id, orderId));
+
+        await db.insert(paymentAllocations).values({
+          id: genId(),
+          paymentId: req.params.id,
+          orderId,
+          allocatedAmountDzd: String(amount),
+        });
+      }
+    }
+
+    if (effectiveType === 'supplier_payment' && purchaseId) {
+      const targetPurchase = await db.select().from(purchases).where(eq(purchases.id, purchaseId)).limit(1);
+      if (targetPurchase.length) {
+        const currentPaid = parseFloat(targetPurchase[0].amountPaidDzd || '0');
+        const totalAmount = parseFloat(targetPurchase[0].totalAmountDzd || '0');
+        const newPaid = currentPaid + amount;
+        const newStatus = newPaid >= totalAmount ? 'paid' : 'partial';
+
+        await db
+          .update(purchases)
+          .set({
+            amountPaidDzd: String(newPaid),
+            paymentStatus: newStatus,
+          })
+          .where(eq(purchases.id, purchaseId));
+
+        await db.insert(paymentAllocations).values({
+          id: genId(),
+          paymentId: req.params.id,
+          purchaseId,
+          allocatedAmountDzd: String(amount),
+        });
+      }
+    }
+
+    notifyDataMutation();
+    broadcastRealtimeEvent({
+      type: 'PAYMENT_UPDATED',
+      entity: 'payments',
+      data: updatedPayment[0],
+    });
+
+    res.json(updatedPayment[0]);
+  } catch (error: any) {
+    console.error('Failed to update payment:', error);
+    res.status(500).json({ error: error.message || 'Failed to update payment' });
+  }
+});
+
+apiApp.delete('/api/payments/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const existing = await db.select().from(payments).where(eq(payments.id, req.params.id)).limit(1);
+    if (!existing.length) {
+      return res.status(404).json({ error: 'Paiement introuvable' });
+    }
+
+    const targetPayment = existing[0];
+    const prevAllocs = await db.select().from(paymentAllocations).where(eq(paymentAllocations.paymentId, req.params.id));
+
+    await recordUndoOperation({
+      actionType: 'delete',
+      entityType: 'payment',
+      entityId: req.params.id,
+      description: `Suppression du paiement ${targetPayment.paymentNumber} (${targetPayment.partyName})`,
+      snapshot: {
+        payment: targetPayment,
+        allocations: prevAllocs,
+      },
+      req,
+    });
+
+    for (const alloc of prevAllocs) {
+      const allocAmt = parseFloat(alloc.allocatedAmountDzd || '0');
+      if (alloc.orderId) {
+        const ord = await db.select().from(orders).where(eq(orders.id, alloc.orderId)).limit(1);
+        if (ord.length) {
+          const currentPaid = parseFloat(ord[0].amountPaidDzd || '0');
+          const newPaid = Math.max(0, currentPaid - allocAmt);
+          await db.update(orders).set({ amountPaidDzd: String(newPaid) }).where(eq(orders.id, alloc.orderId));
+        }
+      }
+      if (alloc.purchaseId) {
+        const purch = await db.select().from(purchases).where(eq(purchases.id, alloc.purchaseId)).limit(1);
+        if (purch.length) {
+          const currentPaid = parseFloat(purch[0].amountPaidDzd || '0');
+          const totalAmt = parseFloat(purch[0].totalAmountDzd || '0');
+          const newPaid = Math.max(0, currentPaid - allocAmt);
+          const newStatus = newPaid <= 0 ? 'unpaid' : newPaid < totalAmt ? 'partial' : 'paid';
+          await db.update(purchases).set({ amountPaidDzd: String(newPaid), paymentStatus: newStatus }).where(eq(purchases.id, alloc.purchaseId));
+        }
+      }
+    }
+
+    await db.delete(paymentAllocations).where(eq(paymentAllocations.paymentId, req.params.id));
+    await db.delete(payments).where(eq(payments.id, req.params.id));
+
+    notifyDataMutation();
+    broadcastRealtimeEvent({
+      type: 'PAYMENT_DELETED',
+      entity: 'payments',
+      data: { id: req.params.id, paymentNumber: targetPayment.paymentNumber },
+    });
+
+    res.json({ success: true, message: `Paiement ${targetPayment.paymentNumber} supprimé avec succès.` });
+  } catch (error: any) {
+    console.error('Failed to delete payment:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete payment' });
+  }
+});
+
 // -------------------------------------------------------------
 // 8. Expense Categories & Expenses
 // -------------------------------------------------------------
