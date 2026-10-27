@@ -1491,14 +1491,18 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Freight / Transport Cost (DZD)</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Frais de Transport (DZD)</label>
               <input
                 type="number"
                 step="0.01"
                 value={freightCost}
                 onChange={(e) => setFreightCost(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 p-2 text-xs font-mono"
+                className="w-full rounded-lg border border-slate-300 p-2 text-xs font-mono font-bold"
+                placeholder="ex: 2000"
               />
+              <span className="text-[10px] text-indigo-700 font-medium block mt-1">
+                💡 Les frais de transport sont automatiquement répartis et ajoutés au prix unitaire/kg de chaque matière lors de l'entrée en stock.
+              </span>
             </div>
 
             <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 text-right">

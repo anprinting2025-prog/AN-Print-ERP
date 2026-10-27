@@ -237,6 +237,17 @@ export interface ProductionUsage {
   notes?: string;
 }
 
+export interface ProductionLog {
+  id: string;
+  productionId: string;
+  userId?: string;
+  userName: string;
+  userRole?: string;
+  action: string;
+  modification: string;
+  timestamp: string;
+}
+
 export interface ProductionRecord {
   id: string;
   productionNumber: string;
@@ -253,6 +264,7 @@ export interface ProductionRecord {
   createdAt?: string;
   order?: Order;
   usage?: ProductionUsage[];
+  logs?: ProductionLog[];
 }
 
 export interface PaymentAllocation {

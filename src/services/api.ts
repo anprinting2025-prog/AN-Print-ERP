@@ -13,6 +13,7 @@ import {
   OrderStatus,
   UserProfile,
   UndoOperation,
+  ProductionLog,
 } from '../types/erp.ts';
 
 const getHeaders = (token?: string | null) => {
@@ -508,6 +509,39 @@ export const api = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Failed to record production');
+    }
+    return res.json();
+  },
+  async updateProduction(id: string, data: any, token?: string | null): Promise<ProductionRecord> {
+    const res = await fetch(`/api/production/${id}`, {
+      method: 'PUT',
+      headers: getHeaders(token),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to update production record');
+    }
+    return res.json();
+  },
+  async deleteProduction(id: string, token?: string | null): Promise<{ success: boolean; message?: string }> {
+    const res = await fetch(`/api/production/${id}`, {
+      method: 'DELETE',
+      headers: getHeaders(token),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to delete production record');
+    }
+    return res.json();
+  },
+  async getProductionLogs(id: string, token?: string | null): Promise<ProductionLog[]> {
+    const res = await fetch(`/api/production/${id}/logs`, {
+      headers: getHeaders(token),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to fetch production logs');
     }
     return res.json();
   },

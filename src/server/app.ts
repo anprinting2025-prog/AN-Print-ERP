@@ -20,6 +20,7 @@ import {
   settings,
   orderLogs,
   purchaseLogs,
+  productionLogs,
   undoOperations,
 } from '../db/schema.ts';
 import { eq, desc, and, gte, lte, sql, inArray } from 'drizzle-orm';
@@ -193,6 +194,145 @@ export async function ensureUndoOperationsTable() {
   return;
 }
 
+// Automatically delete undo operations older than 24 hours
+export async function cleanupOldUndoOperations() {
+  try {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    await db.delete(undoOperations).where(lte(undoOperations.timestamp, cutoff));
+  } catch (err) {
+    console.warn('cleanupOldUndoOperations notice:', err);
+  }
+}
+
+// Run cleanup periodically every hour
+const undoCleanupInterval = setInterval(() => {
+  cleanupOldUndoOperations();
+}, 3600000);
+if (undoCleanupInterval && typeof undoCleanupInterval.unref === 'function') {
+  undoCleanupInterval.unref();
+}
+
+// Ensure production_logs table exists in database
+export async function ensureProductionLogsTable() {
+  // Schema is managed by Drizzle ORM and Cloud SQL UpdateSchema
+  return;
+}
+
+// Live stock lookup map: calculates authoritative stock from stockMovements
+export async function getMaterialsStockMap(): Promise<Map<string, { currentStock: number; stockUnit: string; name: string; trackingMode: string }>> {
+  const matList = await db.select().from(materials);
+  const movements = await db.select().from(stockMovements);
+  const movementsMap = new Map<string, number>();
+
+  movements.forEach((mv) => {
+    const qtyIn = parseFloat(mv.quantityIn || '0');
+    const qtyOut = parseFloat(mv.quantityOut || '0');
+    const prev = movementsMap.get(mv.materialId) ?? 0;
+    movementsMap.set(mv.materialId, prev + (qtyIn - qtyOut));
+  });
+
+  const stockMap = new Map<string, { currentStock: number; stockUnit: string; name: string; trackingMode: string }>();
+  matList.forEach((m) => {
+    let currentStock = 0;
+    if (movementsMap.has(m.id)) {
+      currentStock = Math.max(0, movementsMap.get(m.id)!);
+    } else {
+      currentStock = m.trackingMode === 'kg' ? parseFloat(m.openingStockKg || '0') : parseFloat(m.openingStockPieces || '0');
+    }
+    stockMap.set(m.id, { currentStock, stockUnit: m.stockUnit, name: m.name, trackingMode: m.trackingMode });
+  });
+
+  return stockMap;
+}
+
+// Recalculate weighted average price per Kg for a material when new stock is added
+// Formula: Prix Kg = (Montant Facture old stock + Montant Facture new stock) / (Quantity new stock (kg) + Quantity old stock (kg))
+export async function recalculateWeightedAverageUnitCost(
+  materialId: string,
+  incomingQty: number,
+  incomingUnit: string,
+  incomingUnitCostDzd: number,
+  incomingKg?: number,
+  incomingTotalCostDzd?: number
+) {
+  try {
+    const currentMat = await db.select().from(materials).where(eq(materials.id, materialId)).limit(1);
+    if (!currentMat.length) return;
+
+    const mat = currentMat[0];
+    const oldPricePerKg = parseFloat(mat.unitCostDzd || '0');
+    const piecesPerKg = parseFloat(mat.piecesPerKg || '0');
+
+    // 1. Quantity new stock (kg)
+    let quantityNewStockKg = 0;
+    if (incomingKg !== undefined && incomingKg > 0) {
+      quantityNewStockKg = incomingKg;
+    } else if (incomingUnit === 'kg' || ['ink', 'diluent', 'retarder'].includes(mat.category) || mat.trackingMode === 'kg') {
+      quantityNewStockKg = incomingQty;
+    } else if (piecesPerKg > 0) {
+      quantityNewStockKg = incomingQty / piecesPerKg;
+    } else {
+      quantityNewStockKg = incomingQty;
+    }
+
+    if (quantityNewStockKg <= 0) return;
+
+    // 2. Montant Facture new stock (DZD)
+    let montantFactureNewStock = 0;
+    if (incomingTotalCostDzd !== undefined && incomingTotalCostDzd > 0) {
+      montantFactureNewStock = incomingTotalCostDzd;
+    } else if (incomingUnitCostDzd > 0) {
+      if (incomingUnit === 'piece' && piecesPerKg > 0) {
+        montantFactureNewStock = incomingQty * incomingUnitCostDzd;
+      } else {
+        montantFactureNewStock = quantityNewStockKg * incomingUnitCostDzd;
+      }
+    }
+
+    if (montantFactureNewStock <= 0) return;
+
+    // 3. Quantity old stock (kg)
+    const movements = await db.select().from(stockMovements).where(eq(stockMovements.materialId, materialId));
+    let totalDbUnits = 0;
+    movements.forEach((m) => {
+      totalDbUnits += parseFloat(m.quantityIn || '0') - parseFloat(m.quantityOut || '0');
+    });
+
+    let totalDbKg = 0;
+    if (['ink', 'diluent', 'retarder'].includes(mat.category) || mat.trackingMode === 'kg' || mat.stockUnit === 'kg') {
+      totalDbKg = Math.max(0, totalDbUnits);
+    } else if (piecesPerKg > 0) {
+      totalDbKg = Math.max(0, totalDbUnits) / piecesPerKg;
+    } else {
+      totalDbKg = Math.max(0, totalDbUnits);
+    }
+
+    // Quantity old stock (kg) before addition
+    const quantityOldStockKg = Math.max(0, totalDbKg - quantityNewStockKg);
+
+    // 4. Montant Facture old stock (DZD)
+    const montantFactureOldStock = quantityOldStockKg * oldPricePerKg;
+
+    // 5. Apply User Formula:
+    // Prix Kg = (Montant Facture old stock + Montant Facture new stock) / (Quantity new stock (kg) + Quantity old stock (kg))
+    let prixKg = 0;
+    const totalKg = quantityOldStockKg + quantityNewStockKg;
+
+    if (quantityOldStockKg > 0 && oldPricePerKg > 0) {
+      prixKg = (montantFactureOldStock + montantFactureNewStock) / totalKg;
+    } else {
+      prixKg = montantFactureNewStock / quantityNewStockKg;
+    }
+
+    const finalPricePerKg = Number(prixKg.toFixed(2));
+    if (finalPricePerKg > 0) {
+      await db.update(materials).set({ unitCostDzd: String(finalPricePerKg) }).where(eq(materials.id, materialId));
+    }
+  } catch (err) {
+    console.warn('Error in recalculateWeightedAverageUnitCost:', err);
+  }
+}
+
 // Record an operation in the 10-operation undo stack
 export async function recordUndoOperation({
   actionType,
@@ -260,14 +400,16 @@ export async function recordUndoOperation({
   }
 }
 
-// Initialize owner account and undo table on startup
+// Initialize owner account, undo table, and production logs on startup
 ensureOwnerAccount();
 ensureUndoOperationsTable();
+ensureProductionLogsTable();
 
 // Health Check
 apiApp.get('/api/health', async (req: Request, res: Response) => {
   await ensureOwnerAccount();
   await ensureUndoOperationsTable();
+  await ensureProductionLogsTable();
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -1544,9 +1686,18 @@ apiApp.post('/api/stock-movements/adjust', requireAuth, async (req: AuthRequest,
         unitCostDzd: unitCostDzd ? String(unitCostDzd) : '0',
         userId: await resolveValidProfileId(req.user?.uid),
         userName: effectiveName,
-        notes: notes ? `${notes} (Opérateur: ${effectiveName})` : `Ajustement de stock manuel par ${effectiveName}`,
       })
       .returning();
+
+    // Recalculate weighted average price per Kg on manual stock addition if cost is provided
+    if (isIncrease && unitCostDzd && parseFloat(unitCostDzd) > 0) {
+      await recalculateWeightedAverageUnitCost(
+        materialId,
+        qty,
+        unit || 'piece',
+        parseFloat(unitCostDzd)
+      );
+    }
 
     // Record in undo stack so stock adjustment can be reverted
     await recordUndoOperation({
@@ -2167,6 +2318,29 @@ apiApp.put('/api/purchases/:id', requireAuth, async (req: AuthRequest, res: Resp
         await db.insert(purchaseItems).values(item);
       }
 
+      // If purchase invoice was already received in inventory stock, recalculate weighted average price per Kg (including freight transport cost allocation)!
+      if (prev.receiptStatus === 'received') {
+        for (const item of newItemsToInsert) {
+          const recKg = parseFloat(item.receivedKg || (item.purchaseUnit === 'kg' ? item.quantity : '0'));
+          const incomingPricePerKg = parseFloat(item.unitCostDzd || '0');
+          const itemBaseTotal = parseFloat(item.totalCostDzd || '0') || (parseFloat(item.quantity) * incomingPricePerKg);
+          let itemFreightShare = 0;
+          if (newFreight > 0 && newSubtotal > 0) {
+            itemFreightShare = (itemBaseTotal / newSubtotal) * newFreight;
+          }
+          const itemLandedTotalCost = itemBaseTotal + itemFreightShare;
+
+          await recalculateWeightedAverageUnitCost(
+            item.materialId,
+            parseFloat(item.quantity || '0'),
+            item.purchaseUnit || 'kg',
+            incomingPricePerKg,
+            recKg,
+            itemLandedTotalCost
+          );
+        }
+      }
+
       updates.subtotalDzd = String(newSubtotal);
       changes.push(`Articles modifiés (${newItemsToInsert.length} ligne(s))`);
     }
@@ -2399,6 +2573,9 @@ apiApp.post('/api/purchases/:id/receive', requireAuth, async (req: AuthRequest, 
     const validUserId = await resolveValidProfileId(req.user?.uid);
     const validUserName = req.user?.name || (req.user?.email ? req.user.email.split('@')[0] : 'Staff');
 
+    const freightCost = parseFloat(purchase[0].freightCostDzd || '0');
+    const subtotalCost = parseFloat(purchase[0].subtotalDzd || '0');
+
     for (const item of items) {
       const mat = matMap.get(item.materialId);
       if (!mat) continue;
@@ -2423,6 +2600,14 @@ apiApp.post('/api/purchases/:id/receive', requireAuth, async (req: AuthRequest, 
         }
       }
 
+      // Calculate item total cost including allocated freight transport cost
+      const itemBaseTotal = parseFloat(item.totalCostDzd || '0') || (parseFloat(item.quantity) * parseFloat(item.unitCostDzd || '0'));
+      let itemFreightShare = 0;
+      if (freightCost > 0 && subtotalCost > 0) {
+        itemFreightShare = (itemBaseTotal / subtotalCost) * freightCost;
+      }
+      const itemLandedTotalCost = itemBaseTotal + itemFreightShare;
+
       // Record exact stock movement
       await db.insert(stockMovements).values({
         id: genId(),
@@ -2436,26 +2621,29 @@ apiApp.post('/api/purchases/:id/receive', requireAuth, async (req: AuthRequest, 
         unitCostDzd: item.unitCostDzd,
         userId: validUserId,
         userName: validUserName,
-        notes: `Purchase Receipt for ${purchase[0].purchaseNumber} (${item.quantity} ${item.purchaseUnit})`,
+        notes: `Purchase Receipt for ${purchase[0].purchaseNumber} (${item.quantity} ${item.purchaseUnit})${itemFreightShare > 0 ? ` + ${itemFreightShare.toFixed(2)} DZD transport` : ''}`,
       });
 
-      // Update weighted average cost and conversion factor of material from supplier receipt
-      const oldUnitCost = parseFloat(mat.unitCostDzd || '0');
-      const newUnitCost = parseFloat(item.unitCostDzd || '0');
-      const updatedCost = oldUnitCost > 0 ? ((oldUnitCost + newUnitCost) / 2).toFixed(2) : newUnitCost.toFixed(2);
-
+      // Update conversion factor if dual receipt pieces and kg provided
       const recPcs = parseFloat(item.receivedPieces || '0');
       const recKg = parseFloat(item.receivedKg || (item.purchaseUnit === 'kg' ? item.quantity : '0'));
-      const matUpdates: any = { unitCostDzd: String(updatedCost) };
-
       if (recPcs > 0 && recKg > 0) {
-        matUpdates.piecesPerKg = (recPcs / recKg).toFixed(2);
+        await db
+          .update(materials)
+          .set({ piecesPerKg: (recPcs / recKg).toFixed(2) })
+          .where(eq(materials.id, item.materialId));
       }
 
-      await db
-        .update(materials)
-        .set(matUpdates)
-        .where(eq(materials.id, item.materialId));
+      // Recalculate weighted average price per Kg on new stock intake (using total landed cost including transport)
+      const incomingPricePerKg = parseFloat(item.unitCostDzd || '0');
+      await recalculateWeightedAverageUnitCost(
+        item.materialId,
+        parseFloat(item.quantity || '0'),
+        item.purchaseUnit || 'kg',
+        incomingPricePerKg,
+        recKg,
+        itemLandedTotalCost
+      );
     }
 
     // Update purchase receipt status
@@ -3368,11 +3556,49 @@ apiApp.get('/api/production', async (req: Request, res: Response) => {
   }
 });
 
+// Production Audit Logs
+apiApp.get('/api/production/:id/logs', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    await ensureProductionLogsTable();
+    const logs = await db
+      .select()
+      .from(productionLogs)
+      .where(eq(productionLogs.productionId, req.params.id))
+      .orderBy(desc(productionLogs.timestamp));
+    res.json(logs);
+  } catch (error: any) {
+    console.error('Failed to fetch production logs:', error);
+    res.status(500).json({ error: 'Failed to retrieve production audit logs' });
+  }
+});
+
 apiApp.post('/api/production', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { orderId, plannedQuantity, completedQuantity, rejectedQuantity, workerName, notes, usage } = req.body;
     if (!orderId || !plannedQuantity) {
       return res.status(400).json({ error: 'Order and planned quantity are required' });
+    }
+
+    // 1. Authoritative Stock Availability Check: PREVENT creation if stock < quantity used + waste
+    if (usage && Array.isArray(usage) && usage.length > 0) {
+      const stockMap = await getMaterialsStockMap();
+      for (const u of usage) {
+        const qtyUsed = parseFloat(u.quantityUsed || '0');
+        const wasteQty = parseFloat(u.wasteQuantity || '0');
+        const totalNeeded = qtyUsed + wasteQty;
+        if (totalNeeded <= 0) continue;
+
+        const matInfo = stockMap.get(u.materialId);
+        const available = matInfo ? matInfo.currentStock : 0;
+        const matName = matInfo ? matInfo.name : (u.materialName || 'Matière');
+        const unit = matInfo ? matInfo.stockUnit : (u.unit || 'unité');
+
+        if (totalNeeded > available) {
+          return res.status(400).json({
+            error: `Stock insuffisant pour "${matName}". Stock disponible : ${available} ${unit}, Quantité totale requise : ${totalNeeded} ${unit}. Veuillez approvisionner le stock ou ajuster les quantités.`,
+          });
+        }
+      }
     }
 
     const prodCount = (await db.select({ count: sql<number>`count(*)` }).from(productionRecords))[0]?.count || 0;
@@ -3396,6 +3622,11 @@ apiApp.post('/api/production', requireAuth, async (req: AuthRequest, res: Respon
       })
       .returning();
 
+    const insertedUsage: any[] = [];
+    const validUserId = await resolveValidProfileId(req.user?.uid);
+    const validUserName = req.user?.name || (req.user?.email ? req.user.email.split('@')[0] : 'Staff');
+    const validRole = req.userRole || 'staff';
+
     // If usage is submitted with completion, record usage and stock movements exactly once
     if (usage && Array.isArray(usage) && usage.length > 0) {
       const matList = await db.select().from(materials);
@@ -3408,8 +3639,9 @@ apiApp.post('/api/production', requireAuth, async (req: AuthRequest, res: Respon
 
         if (qtyUsed <= 0 && wasteQty <= 0) continue;
 
-        await db.insert(productionUsage).values({
-          id: genId(),
+        const uId = genId();
+        const usageRow = {
+          id: uId,
           productionId: prodId,
           materialId: u.materialId,
           materialName: mat ? mat.name : (u.materialName || ''),
@@ -3417,9 +3649,10 @@ apiApp.post('/api/production', requireAuth, async (req: AuthRequest, res: Respon
           unit: u.unit || (mat ? mat.stockUnit : 'kg'),
           wasteQuantity: String(wasteQty),
           notes: u.notes || '',
-        });
+        };
+        await db.insert(productionUsage).values(usageRow);
+        insertedUsage.push(usageRow);
 
-        const validUserId = await resolveValidProfileId(req.user?.uid);
         // Deduct from stock movement ledger: Consumption
         if (qtyUsed > 0) {
           await db.insert(stockMovements).values({
@@ -3461,10 +3694,314 @@ apiApp.post('/api/production', requireAuth, async (req: AuthRequest, res: Respon
     // Automatically update order status to in_production
     await db.update(orders).set({ status: 'in_production' }).where(eq(orders.id, orderId));
 
+    // Audit Log Entry
+    try {
+      await ensureProductionLogsTable();
+      await db.insert(productionLogs).values({
+        id: genId(),
+        productionId: prodId,
+        userId: validUserId,
+        userName: validUserName,
+        userRole: validRole,
+        action: 'Création',
+        modification: `Création de l'OF ${productionNumber} (Prévu: ${plannedQuantity}, Produit: ${completedQuantity || 0}, Rebut: ${rejectedQuantity || 0})${insertedUsage.length > 0 ? ` avec ${insertedUsage.length} matière(s) déduite(s) du stock` : ''}`,
+      });
+    } catch (logErr) {
+      console.warn('Production log insert notice:', logErr);
+    }
+
+    // Record snapshot in 100-operation Undo Stack
+    await recordUndoOperation({
+      actionType: 'delete',
+      entityType: 'production',
+      entityId: prodId,
+      description: `Création fiche production ${productionNumber}`,
+      snapshot: {
+        production: created[0],
+        usage: insertedUsage,
+      },
+      req,
+    });
+
+    notifyDataMutation();
+    broadcastRealtimeEvent({
+      type: 'PRODUCTION_CREATED',
+      entity: 'production',
+      data: created[0],
+    });
+
     res.status(201).json(created[0]);
   } catch (error: any) {
     console.error('Failed to create production record:', error);
     res.status(500).json({ error: error.message || 'Failed to create production record' });
+  }
+});
+
+// Update Production Record & Adjust Consumed Stock
+apiApp.put('/api/production/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const {
+      plannedQuantity,
+      completedQuantity,
+      rejectedQuantity,
+      workerName,
+      status,
+      notes,
+      usage,
+      modifierName,
+      modifierRole,
+    } = req.body;
+
+    const current = await db.select().from(productionRecords).where(eq(productionRecords.id, req.params.id)).limit(1);
+    if (!current.length) {
+      return res.status(404).json({ error: 'Fiche de production introuvable' });
+    }
+
+    const prev = current[0];
+    const oldUsage = await db.select().from(productionUsage).where(eq(productionUsage.productionId, req.params.id));
+    const effectiveName = modifierName || req.user?.name || (req.user?.email ? req.user.email.split('@')[0] : 'Staff');
+    const effectiveRole = modifierRole || req.userRole || 'staff';
+
+    // Stock check for new usage: Available stock = Current Stock in Ledger + previously deducted quantity in this production
+    if (usage && Array.isArray(usage) && usage.length > 0) {
+      const stockMap = await getMaterialsStockMap();
+      for (const u of usage) {
+        const qtyUsed = parseFloat(u.quantityUsed || '0');
+        const wasteQty = parseFloat(u.wasteQuantity || '0');
+        const newTotalNeeded = qtyUsed + wasteQty;
+        if (newTotalNeeded <= 0) continue;
+
+        // Sum previous deduction for this material in this specific production record
+        const prevUsageForMat = oldUsage
+          .filter((ou) => ou.materialId === u.materialId)
+          .reduce((sum, ou) => sum + parseFloat(ou.quantityUsed || '0') + parseFloat(ou.wasteQuantity || '0'), 0);
+
+        const matInfo = stockMap.get(u.materialId);
+        const liveStock = matInfo ? matInfo.currentStock : 0;
+        const availableForUpdate = liveStock + prevUsageForMat;
+        const matName = matInfo ? matInfo.name : (u.materialName || 'Matière');
+        const unit = matInfo ? matInfo.stockUnit : (u.unit || 'unité');
+
+        if (newTotalNeeded > availableForUpdate) {
+          return res.status(400).json({
+            error: `Stock insuffisant pour "${matName}". Stock disponible : ${availableForUpdate.toFixed(2)} ${unit}, Quantité requise : ${newTotalNeeded} ${unit}.`,
+          });
+        }
+      }
+    }
+
+    // Save snapshot in undo stack
+    await recordUndoOperation({
+      actionType: 'update',
+      entityType: 'production',
+      entityId: req.params.id,
+      description: `Modification fiche de production ${prev.productionNumber}`,
+      snapshot: {
+        production: prev,
+        usage: oldUsage,
+      },
+      req,
+    });
+
+    const changes: string[] = [];
+    const updates: any = {};
+
+    if (plannedQuantity !== undefined && String(plannedQuantity) !== String(prev.plannedQuantity)) {
+      updates.plannedQuantity = String(plannedQuantity);
+      changes.push(`Quantité prévue : ${prev.plannedQuantity} → ${plannedQuantity}`);
+    }
+    if (completedQuantity !== undefined && String(completedQuantity) !== String(prev.completedQuantity)) {
+      updates.completedQuantity = String(completedQuantity);
+      changes.push(`Quantité terminée : ${prev.completedQuantity} → ${completedQuantity}`);
+    }
+    if (rejectedQuantity !== undefined && String(rejectedQuantity) !== String(prev.rejectedQuantity)) {
+      updates.rejectedQuantity = String(rejectedQuantity);
+      changes.push(`Quantité rebut : ${prev.rejectedQuantity} → ${rejectedQuantity}`);
+    }
+    if (workerName !== undefined && workerName !== prev.workerName) {
+      updates.workerName = workerName;
+      changes.push(`Opérateur : "${prev.workerName || 'N/A'}" → "${workerName}"`);
+    }
+    if (status !== undefined && status !== prev.status) {
+      updates.status = status;
+      changes.push(`Statut : "${prev.status}" → "${status}"`);
+    }
+    if (notes !== undefined && notes !== prev.notes) {
+      updates.notes = notes;
+      changes.push(`Notes mises à jour`);
+    }
+
+    if (Object.keys(updates).length === 0) {
+      updates.status = prev.status;
+    }
+
+    // Update production record
+    const updated = await db
+      .update(productionRecords)
+      .set(updates)
+      .where(eq(productionRecords.id, req.params.id))
+      .returning();
+
+    // Reconcile Consumables & Stock Movements if usage was provided
+    if (usage && Array.isArray(usage)) {
+      // 1. Remove previous stock movements linked to this production run
+      await db
+        .delete(stockMovements)
+        .where(
+          and(
+            eq(stockMovements.referenceType, 'production'),
+            eq(stockMovements.referenceId, prev.productionNumber)
+          )
+        );
+
+      // 2. Clear old productionUsage rows
+      await db.delete(productionUsage).where(eq(productionUsage.productionId, req.params.id));
+
+      // 3. Insert new productionUsage rows and corresponding stock deductions
+      const matList = await db.select().from(materials);
+      const matMap = new Map(matList.map((m) => [m.id, m]));
+      const validUserId = await resolveValidProfileId(req.user?.uid);
+
+      for (const u of usage) {
+        const mat = matMap.get(u.materialId);
+        const qtyUsed = parseFloat(u.quantityUsed || '0');
+        const wasteQty = parseFloat(u.wasteQuantity || '0');
+        if (qtyUsed <= 0 && wasteQty <= 0) continue;
+
+        await db.insert(productionUsage).values({
+          id: genId(),
+          productionId: req.params.id,
+          materialId: u.materialId,
+          materialName: mat ? mat.name : (u.materialName || ''),
+          quantityUsed: String(qtyUsed),
+          unit: u.unit || (mat ? mat.stockUnit : 'kg'),
+          wasteQuantity: String(wasteQty),
+          notes: u.notes || '',
+        });
+
+        if (qtyUsed > 0) {
+          await db.insert(stockMovements).values({
+            id: genId(),
+            materialId: u.materialId,
+            movementType: 'production_consumption',
+            quantityIn: '0',
+            quantityOut: String(qtyUsed),
+            unit: u.unit || (mat ? mat.stockUnit : 'kg'),
+            referenceType: 'production',
+            referenceId: prev.productionNumber,
+            unitCostDzd: mat ? mat.unitCostDzd : '0',
+            userId: validUserId,
+            userName: effectiveName,
+            notes: `Consumed for order production ${prev.productionNumber} (updated)`,
+          });
+        }
+
+        if (wasteQty > 0) {
+          await db.insert(stockMovements).values({
+            id: genId(),
+            materialId: u.materialId,
+            movementType: 'production_waste',
+            quantityIn: '0',
+            quantityOut: String(wasteQty),
+            unit: u.unit || (mat ? mat.stockUnit : 'kg'),
+            referenceType: 'production',
+            referenceId: prev.productionNumber,
+            unitCostDzd: mat ? mat.unitCostDzd : '0',
+            userId: validUserId,
+            userName: effectiveName,
+            notes: `Waste during production ${prev.productionNumber} (updated)`,
+          });
+        }
+      }
+      changes.push(`Consommables matières mis à jour (${usage.length} lignes)`);
+    }
+
+    // Insert Audit Log entry
+    try {
+      await ensureProductionLogsTable();
+      await db.insert(productionLogs).values({
+        id: genId(),
+        productionId: req.params.id,
+        userId: await resolveValidProfileId(req.user?.uid),
+        userName: effectiveName,
+        userRole: effectiveRole,
+        action: 'Modification',
+        modification: changes.length > 0 ? changes.join(' | ') : 'Mise à jour des informations de production',
+      });
+    } catch (logErr) {
+      console.warn('Production log insert notice:', logErr);
+    }
+
+    notifyDataMutation();
+    broadcastRealtimeEvent({
+      type: 'PRODUCTION_UPDATED',
+      entity: 'production',
+      data: updated[0],
+    });
+
+    res.json(updated[0]);
+  } catch (error: any) {
+    console.error('Failed to update production record:', error);
+    res.status(500).json({ error: error.message || 'Failed to update production record' });
+  }
+});
+
+// Delete Production Record with Stock Reversal & Audit Snapshot
+apiApp.delete('/api/production/:id', requireAuth, requireInventoryManagerOrAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const current = await db.select().from(productionRecords).where(eq(productionRecords.id, req.params.id)).limit(1);
+    if (!current.length) {
+      return res.status(404).json({ error: 'Fiche de production introuvable' });
+    }
+
+    const prev = current[0];
+    const oldUsage = await db.select().from(productionUsage).where(eq(productionUsage.productionId, req.params.id));
+    await ensureProductionLogsTable();
+    const oldLogs = await db.select().from(productionLogs).where(eq(productionLogs.productionId, req.params.id));
+
+    // Save snapshot in undo stack
+    await recordUndoOperation({
+      actionType: 'delete',
+      entityType: 'production',
+      entityId: req.params.id,
+      description: `Suppression fiche de production ${prev.productionNumber}`,
+      snapshot: {
+        production: prev,
+        usage: oldUsage,
+        logs: oldLogs,
+      },
+      req,
+    });
+
+    // 1. Re-credit inventory: delete stockMovements tied to this production number
+    await db
+      .delete(stockMovements)
+      .where(
+        and(
+          eq(stockMovements.referenceType, 'production'),
+          eq(stockMovements.referenceId, prev.productionNumber)
+        )
+      );
+
+    // 2. Delete logs, usage, and the production record
+    await db.delete(productionLogs).where(eq(productionLogs.productionId, req.params.id));
+    await db.delete(productionUsage).where(eq(productionUsage.productionId, req.params.id));
+    await db.delete(productionRecords).where(eq(productionRecords.id, req.params.id));
+
+    notifyDataMutation();
+    broadcastRealtimeEvent({
+      type: 'PRODUCTION_DELETED',
+      entity: 'production',
+      data: { id: req.params.id, productionNumber: prev.productionNumber },
+    });
+
+    res.json({
+      success: true,
+      message: `Fiche de production ${prev.productionNumber} supprimée avec succès. Les matières consommées ont été réintégrées au stock.`,
+    });
+  } catch (error: any) {
+    console.error('Failed to delete production record:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete production record' });
   }
 });
 
@@ -3869,7 +4406,20 @@ apiApp.get('/api/reports/dashboard', async (req: Request, res: Response) => {
     allMaterials.forEach((m) => {
       const stock = stockMap[m.id] !== undefined ? Math.max(0, stockMap[m.id]) : parseFloat(m.openingStockPieces || m.openingStockKg || '0');
       const unitCost = parseFloat(m.unitCostDzd || '0');
-      totalInventoryValuation += stock * unitCost;
+
+      let itemValuation = 0;
+      const piecesPerKg = parseFloat(m.piecesPerKg || '0');
+
+      if (['ink', 'diluent', 'retarder'].includes(m.category) || m.trackingMode === 'kg' || m.stockUnit === 'kg') {
+        itemValuation = stock * unitCost; // stock in kg * price per kg
+      } else if (piecesPerKg > 0) {
+        const stockWeightKg = stock / piecesPerKg; // weight in kg
+        itemValuation = stockWeightKg * unitCost; // Price per Kg * current stock weight in Kg
+      } else {
+        itemValuation = stock * unitCost;
+      }
+
+      totalInventoryValuation += itemValuation;
 
       if (stock <= parseFloat(m.reorderThreshold || '0')) {
         lowStockMaterials.push({
@@ -3983,6 +4533,7 @@ apiApp.get('/api/reports/dashboard', async (req: Request, res: Response) => {
 apiApp.get('/api/undo/history', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     await ensureUndoOperationsTable();
+    await cleanupOldUndoOperations();
     const list = await db
       .select()
       .from(undoOperations)
@@ -4516,6 +5067,131 @@ apiApp.post('/api/undo/:id', requireAuth, requireOwnerOrAdmin, async (req: AuthR
       await db.delete(stockMovements).where(eq(stockMovements.id, op.entityId));
     }
 
+    // 10. Production record single delete or update rollback
+    else if (op.entityType === 'production') {
+      const pr = snap.production;
+      if (pr) {
+        if (op.actionType === 'delete') {
+          await db.insert(productionRecords).values(pr).onConflictDoNothing();
+          if (snap.usage && Array.isArray(snap.usage)) {
+            for (const u of snap.usage) {
+              await db.insert(productionUsage).values(u).onConflictDoNothing();
+              const qtyUsed = parseFloat(u.quantityUsed || '0');
+              const wasteQty = parseFloat(u.wasteQuantity || '0');
+              if (qtyUsed > 0) {
+                await db.insert(stockMovements).values({
+                  id: genId(),
+                  materialId: u.materialId,
+                  movementType: 'production_consumption',
+                  quantityIn: '0',
+                  quantityOut: String(qtyUsed),
+                  unit: u.unit || 'piece',
+                  referenceType: 'production',
+                  referenceId: pr.productionNumber,
+                  unitCostDzd: '0',
+                  userId: await resolveValidProfileId(req.user?.uid),
+                  userName: op.performedBy || 'System',
+                  notes: `Restored consumption for ${pr.productionNumber} (Undo)`,
+                });
+              }
+              if (wasteQty > 0) {
+                await db.insert(stockMovements).values({
+                  id: genId(),
+                  materialId: u.materialId,
+                  movementType: 'production_waste',
+                  quantityIn: '0',
+                  quantityOut: String(wasteQty),
+                  unit: u.unit || 'piece',
+                  referenceType: 'production',
+                  referenceId: pr.productionNumber,
+                  unitCostDzd: '0',
+                  userId: await resolveValidProfileId(req.user?.uid),
+                  userName: op.performedBy || 'System',
+                  notes: `Restored waste for ${pr.productionNumber} (Undo)`,
+                });
+              }
+            }
+          }
+          if (snap.logs && Array.isArray(snap.logs)) {
+            for (const log of snap.logs) {
+              await db.insert(productionLogs).values(log).onConflictDoNothing();
+            }
+          }
+          await db.insert(productionLogs).values({
+            id: genId(),
+            productionId: pr.id,
+            userId: await resolveValidProfileId(req.user?.uid),
+            userName: req.user?.name || op.performedBy || 'Staff',
+            userRole: req.userRole || op.performedByRole || 'staff',
+            action: 'Restauration (Undo)',
+            modification: `Restauration de la fiche de production ${pr.productionNumber} après suppression`,
+          });
+        } else if (op.actionType === 'update') {
+          await db.update(productionRecords).set({
+            plannedQuantity: pr.plannedQuantity,
+            completedQuantity: pr.completedQuantity,
+            rejectedQuantity: pr.rejectedQuantity,
+            workerName: pr.workerName,
+            status: pr.status,
+            notes: pr.notes,
+          }).where(eq(productionRecords.id, pr.id));
+
+          await db.delete(stockMovements).where(and(eq(stockMovements.referenceType, 'production'), eq(stockMovements.referenceId, pr.productionNumber)));
+          await db.delete(productionUsage).where(eq(productionUsage.productionId, pr.id));
+
+          if (snap.usage && Array.isArray(snap.usage)) {
+            for (const u of snap.usage) {
+              await db.insert(productionUsage).values(u);
+              const qtyUsed = parseFloat(u.quantityUsed || '0');
+              const wasteQty = parseFloat(u.wasteQuantity || '0');
+              if (qtyUsed > 0) {
+                await db.insert(stockMovements).values({
+                  id: genId(),
+                  materialId: u.materialId,
+                  movementType: 'production_consumption',
+                  quantityIn: '0',
+                  quantityOut: String(qtyUsed),
+                  unit: u.unit || 'piece',
+                  referenceType: 'production',
+                  referenceId: pr.productionNumber,
+                  unitCostDzd: '0',
+                  userId: await resolveValidProfileId(req.user?.uid),
+                  userName: op.performedBy || 'Staff',
+                  notes: `Reverted consumption for ${pr.productionNumber} (Undo)`,
+                });
+              }
+              if (wasteQty > 0) {
+                await db.insert(stockMovements).values({
+                  id: genId(),
+                  materialId: u.materialId,
+                  movementType: 'production_waste',
+                  quantityIn: '0',
+                  quantityOut: String(wasteQty),
+                  unit: u.unit || 'piece',
+                  referenceType: 'production',
+                  referenceId: pr.productionNumber,
+                  unitCostDzd: '0',
+                  userId: await resolveValidProfileId(req.user?.uid),
+                  userName: op.performedBy || 'Staff',
+                  notes: `Reverted waste for ${pr.productionNumber} (Undo)`,
+                });
+              }
+            }
+          }
+
+          await db.insert(productionLogs).values({
+            id: genId(),
+            productionId: pr.id,
+            userId: await resolveValidProfileId(req.user?.uid),
+            userName: req.user?.name || op.performedBy || 'Staff',
+            userRole: req.userRole || op.performedByRole || 'staff',
+            action: 'Restauration (Undo)',
+            modification: `Rétablissement des valeurs antérieures suite à l'annulation (Undo)`,
+          });
+        }
+      }
+    }
+
     // Mark operation as undone
     await db
       .update(undoOperations)
@@ -4732,6 +5408,130 @@ apiApp.post('/api/undo/latest', requireAuth, requireOwnerOrAdmin, async (req: Au
     // Stock movement rollback
     else if (op.entityType === 'stock_movement') {
       await db.delete(stockMovements).where(eq(stockMovements.id, op.entityId));
+    }
+    // Production record single delete or update rollback
+    else if (op.entityType === 'production') {
+      const pr = snap.production;
+      if (pr) {
+        if (op.actionType === 'delete') {
+          await db.insert(productionRecords).values(pr).onConflictDoNothing();
+          if (snap.usage && Array.isArray(snap.usage)) {
+            for (const u of snap.usage) {
+              await db.insert(productionUsage).values(u).onConflictDoNothing();
+              const qtyUsed = parseFloat(u.quantityUsed || '0');
+              const wasteQty = parseFloat(u.wasteQuantity || '0');
+              if (qtyUsed > 0) {
+                await db.insert(stockMovements).values({
+                  id: genId(),
+                  materialId: u.materialId,
+                  movementType: 'production_consumption',
+                  quantityIn: '0',
+                  quantityOut: String(qtyUsed),
+                  unit: u.unit || 'piece',
+                  referenceType: 'production',
+                  referenceId: pr.productionNumber,
+                  unitCostDzd: '0',
+                  userId: await resolveValidProfileId(req.user?.uid),
+                  userName: op.performedBy || 'System',
+                  notes: `Restored consumption for ${pr.productionNumber} (Undo)`,
+                });
+              }
+              if (wasteQty > 0) {
+                await db.insert(stockMovements).values({
+                  id: genId(),
+                  materialId: u.materialId,
+                  movementType: 'production_waste',
+                  quantityIn: '0',
+                  quantityOut: String(wasteQty),
+                  unit: u.unit || 'piece',
+                  referenceType: 'production',
+                  referenceId: pr.productionNumber,
+                  unitCostDzd: '0',
+                  userId: await resolveValidProfileId(req.user?.uid),
+                  userName: op.performedBy || 'System',
+                  notes: `Restored waste for ${pr.productionNumber} (Undo)`,
+                });
+              }
+            }
+          }
+          if (snap.logs && Array.isArray(snap.logs)) {
+            for (const log of snap.logs) {
+              await db.insert(productionLogs).values(log).onConflictDoNothing();
+            }
+          }
+          await db.insert(productionLogs).values({
+            id: genId(),
+            productionId: pr.id,
+            userId: await resolveValidProfileId(req.user?.uid),
+            userName: req.user?.name || op.performedBy || 'Staff',
+            userRole: req.userRole || op.performedByRole || 'staff',
+            action: 'Restauration (Undo)',
+            modification: `Restauration de la fiche de production ${pr.productionNumber} après suppression`,
+          });
+        } else if (op.actionType === 'update') {
+          await db.update(productionRecords).set({
+            plannedQuantity: pr.plannedQuantity,
+            completedQuantity: pr.completedQuantity,
+            rejectedQuantity: pr.rejectedQuantity,
+            workerName: pr.workerName,
+            status: pr.status,
+            notes: pr.notes,
+          }).where(eq(productionRecords.id, pr.id));
+
+          await db.delete(stockMovements).where(and(eq(stockMovements.referenceType, 'production'), eq(stockMovements.referenceId, pr.productionNumber)));
+          await db.delete(productionUsage).where(eq(productionUsage.productionId, pr.id));
+
+          if (snap.usage && Array.isArray(snap.usage)) {
+            for (const u of snap.usage) {
+              await db.insert(productionUsage).values(u);
+              const qtyUsed = parseFloat(u.quantityUsed || '0');
+              const wasteQty = parseFloat(u.wasteQuantity || '0');
+              if (qtyUsed > 0) {
+                await db.insert(stockMovements).values({
+                  id: genId(),
+                  materialId: u.materialId,
+                  movementType: 'production_consumption',
+                  quantityIn: '0',
+                  quantityOut: String(qtyUsed),
+                  unit: u.unit || 'piece',
+                  referenceType: 'production',
+                  referenceId: pr.productionNumber,
+                  unitCostDzd: '0',
+                  userId: await resolveValidProfileId(req.user?.uid),
+                  userName: op.performedBy || 'Staff',
+                  notes: `Reverted consumption for ${pr.productionNumber} (Undo)`,
+                });
+              }
+              if (wasteQty > 0) {
+                await db.insert(stockMovements).values({
+                  id: genId(),
+                  materialId: u.materialId,
+                  movementType: 'production_waste',
+                  quantityIn: '0',
+                  quantityOut: String(wasteQty),
+                  unit: u.unit || 'piece',
+                  referenceType: 'production',
+                  referenceId: pr.productionNumber,
+                  unitCostDzd: '0',
+                  userId: await resolveValidProfileId(req.user?.uid),
+                  userName: op.performedBy || 'Staff',
+                  notes: `Reverted waste for ${pr.productionNumber} (Undo)`,
+                });
+              }
+            }
+          }
+
+          await db.insert(productionLogs).values({
+            id: genId(),
+            productionId: pr.id,
+            userId: await resolveValidProfileId(req.user?.uid),
+            userName: req.user?.name || op.performedBy || 'Staff',
+            userRole: req.userRole || op.performedByRole || 'staff',
+            action: 'Restauration (Undo)',
+            modification: `Rétablissement des valeurs antérieures suite à l'annulation (Undo)`,
+          });
+        }
+      }
     }
 
     // Mark as undone

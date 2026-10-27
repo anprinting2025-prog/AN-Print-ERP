@@ -616,6 +616,43 @@ export const InventoryView: React.FC = () => {
       {/* Tab 1: Materials Catalog */}
       {activeTab === 'materials' && (
         <div className="space-y-4">
+          {/* Inventory Valuation & Metrics Bar */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="rounded-2xl border border-slate-200 bg-white p-3.5 shadow-2xs">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Matières au Catalogue</div>
+              <div className="text-lg font-black text-slate-900 mt-0.5">{materials.length} Référence(s)</div>
+            </div>
+
+            <div className="rounded-2xl border border-indigo-200 bg-gradient-to-r from-indigo-50/90 to-white p-3.5 shadow-2xs">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-indigo-700">Valeur Totale du Stock</div>
+              <div className="text-lg font-black text-indigo-900 mt-0.5">
+                {formatDZD(
+                  materials.reduce((acc, m) => {
+                    const stock = m.currentStock || 0;
+                    const unitCost = parseFloat(m.unitCostDzd || '0');
+                    const piecesPerKg = parseFloat(m.piecesPerKg || '0');
+                    if (['ink', 'diluent', 'retarder'].includes(m.category) || m.trackingMode === 'kg' || m.stockUnit === 'kg') {
+                      return acc + stock * unitCost;
+                    } else if (piecesPerKg > 0) {
+                      const stockKg = stock / piecesPerKg;
+                      return acc + stockKg * unitCost; // Price of Kg * current stock weight in Kg
+                    } else {
+                      return acc + stock * unitCost;
+                    }
+                  }, 0)
+                )}
+              </div>
+              <div className="text-[10px] text-indigo-600 font-medium">Prix/Kg × Poids Réel Stock (Kg)</div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-3.5 shadow-2xs">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Alerte Stock Bas</div>
+              <div className="text-lg font-black text-amber-600 mt-0.5">
+                {materials.filter((m) => (m.currentStock || 0) <= parseFloat(m.reorderThreshold || '0')).length} Matière(s)
+              </div>
+            </div>
+          </div>
+
           {/* Filters & Search */}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="relative flex-1 max-w-sm">
@@ -706,10 +743,27 @@ export const InventoryView: React.FC = () => {
 
                   <div className="flex items-center justify-between text-xs pt-2 border-t border-slate-100">
                     <span className="text-slate-500">
-                      Coût : {parseFloat(m.unitCostDzd || '0') > 0 ? (
-                        <strong className="text-slate-800">{formatDZD(m.unitCostDzd)}</strong>
+                      {['ink', 'diluent', 'retarder'].includes(m.category) ? (
+                        <span>
+                          Coût : {parseFloat(m.unitCostDzd || '0') > 0 ? (
+                            <strong className="text-slate-800">{formatDZD(m.unitCostDzd)} / kg</strong>
+                          ) : (
+                            <span className="italic text-slate-400">Selon facture</span>
+                          )}
+                        </span>
                       ) : (
-                        <span className="italic text-slate-400">Selon facture</span>
+                        <span>
+                          Prix/Kg : {parseFloat(m.unitCostDzd || '0') > 0 ? (
+                            <strong className="text-slate-800">{formatDZD(m.unitCostDzd)}</strong>
+                          ) : (
+                            <span className="italic text-slate-400">N/A</span>
+                          )}
+                          {parseFloat(m.unitCostDzd || '0') > 0 && parseFloat(m.piecesPerKg || '0') > 0 && (
+                            <span className="text-indigo-600 font-bold ml-2">
+                              • {formatDZD(parseFloat(m.unitCostDzd || '0') / parseFloat(m.piecesPerKg))} / pc
+                            </span>
+                          )}
+                        </span>
                       )}
                     </span>
                     <div className="flex items-center gap-2">
@@ -758,8 +812,8 @@ export const InventoryView: React.FC = () => {
                     <th className="py-3 px-4">Category</th>
                     <th className="py-3 px-4 text-right">Current Stock</th>
                     <th className="py-3 px-4 text-right">Dual Tracking (Kg/Pcs)</th>
-                    <th className="py-3 px-4 text-right">Unit Cost</th>
-                    <th className="py-3 px-4 text-center">Reorder Level</th>
+                    <th className="py-3 px-4 text-right">Prix Kg / Prix Pièce</th>
+                    <th className="py-3 px-4 text-center">Seuil Alerte</th>
                     <th className="py-3 px-4 text-center">Actions</th>
                   </tr>
                 </thead>
@@ -807,12 +861,29 @@ export const InventoryView: React.FC = () => {
                           )}
                         </td>
                         <td className="py-3 px-4 text-right font-medium text-slate-800">
-                          {parseFloat(m.unitCostDzd || '0') > 0 ? (
-                            <span className="font-bold">{formatDZD(m.unitCostDzd)}</span>
+                          {['ink', 'diluent', 'retarder'].includes(m.category) ? (
+                            parseFloat(m.unitCostDzd || '0') > 0 ? (
+                              <span className="font-bold text-slate-900">{formatDZD(m.unitCostDzd)} / kg</span>
+                            ) : (
+                              <span className="text-slate-400 text-[11px] italic">Selon facture</span>
+                            )
                           ) : (
-                            <span className="text-slate-400 text-[11px] italic">
-                              Selon facture fournisseur
-                            </span>
+                            <div>
+                              {parseFloat(m.unitCostDzd || '0') > 0 ? (
+                                <>
+                                  <div className="font-bold text-slate-900">{formatDZD(m.unitCostDzd)} / kg</div>
+                                  {parseFloat(m.piecesPerKg || '0') > 0 ? (
+                                    <div className="text-[11px] font-semibold text-indigo-600 mt-0.5">
+                                      {formatDZD(parseFloat(m.unitCostDzd || '0') / parseFloat(m.piecesPerKg))} / pc
+                                    </div>
+                                  ) : (
+                                    <div className="text-[10px] text-slate-400 italic">Prix pc d'après arrivage</div>
+                                  )}
+                                </>
+                              ) : (
+                                <span className="text-slate-400 text-[11px] italic">Selon facture</span>
+                              )}
+                            </div>
                           )}
                         </td>
                         <td className="py-3 px-4 text-center">
@@ -1511,14 +1582,20 @@ export const InventoryView: React.FC = () => {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Unit Cost (DZD)</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Prix par Kg (DZD/kg) *</label>
               <input
                 type="number"
                 step="0.01"
                 value={formData.unitCostDzd}
                 onChange={(e) => setFormData({ ...formData, unitCostDzd: e.target.value })}
-                className="w-full rounded-lg border border-slate-300 p-2 text-xs font-mono"
+                className="w-full rounded-lg border border-slate-300 p-2 text-xs font-mono font-bold"
+                placeholder="ex: 440"
               />
+              {parseFloat(formData.piecesPerKg || '0') > 0 && parseFloat(formData.unitCostDzd || '0') > 0 && (
+                <span className="text-[10px] font-semibold text-indigo-600 block mt-1">
+                  ≈ {(parseFloat(formData.unitCostDzd) / parseFloat(formData.piecesPerKg)).toFixed(2)} DA / pièce
+                </span>
+              )}
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">Reorder Alert Level</label>

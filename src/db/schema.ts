@@ -264,6 +264,7 @@ export const productionRecordsRelations = relations(productionRecords, ({ one, m
     references: [orders.id],
   }),
   usage: many(productionUsage),
+  logs: many(productionLogs),
 }));
 
 // 10. Production Usage
@@ -286,6 +287,25 @@ export const productionUsageRelations = relations(productionUsage, ({ one }) => 
   material: one(materials, {
     fields: [productionUsage.materialId],
     references: [materials.id],
+  }),
+}));
+
+// 10b. Production Audit Logs
+export const productionLogs = pgTable('production_logs', {
+  id: text('id').primaryKey(),
+  productionId: text('production_id').references(() => productionRecords.id, { onDelete: 'cascade' }).notNull(),
+  userId: text('user_id'),
+  userName: text('user_name').notNull().default(''),
+  userRole: text('user_role').default(''),
+  action: text('action').notNull(),
+  modification: text('modification').notNull(),
+  timestamp: timestamp('timestamp').defaultNow(),
+});
+
+export const productionLogsRelations = relations(productionLogs, ({ one }) => ({
+  production: one(productionRecords, {
+    fields: [productionLogs.productionId],
+    references: [productionRecords.id],
   }),
 }));
 
