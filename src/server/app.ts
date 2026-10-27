@@ -234,18 +234,25 @@ export async function recordUndoOperation({
       isUndone: false,
     });
 
-    // Retain strictly the latest 10 operations
+    // Retain up to 100 operations in the undo history
     const all = await db
       .select({ id: undoOperations.id })
       .from(undoOperations)
       .orderBy(desc(undoOperations.timestamp));
 
-    if (all.length > 10) {
-      const excess = all.slice(10);
+    if (all.length > 100) {
+      const excess = all.slice(100);
       for (const item of excess) {
         await db.delete(undoOperations).where(eq(undoOperations.id, item.id));
       }
     }
+
+    notifyDataMutation();
+    broadcastRealtimeEvent({
+      type: 'UNDO_RECORDED',
+      entity: entityType,
+      data: { id: opId, description, actionType },
+    });
 
     return opId;
   } catch (err) {
@@ -1541,6 +1548,16 @@ apiApp.post('/api/stock-movements/adjust', requireAuth, async (req: AuthRequest,
       })
       .returning();
 
+    // Record in undo stack so stock adjustment can be reverted
+    await recordUndoOperation({
+      actionType: 'delete',
+      entityType: 'stock_movement',
+      entityId: movement[0].id,
+      description: `Ajustement de stock manuel (${isIncrease ? '+' : '-'}${qty} ${unit || 'piece'})`,
+      snapshot: movement[0],
+      req,
+    });
+
     notifyDataMutation();
     broadcastRealtimeEvent({
       type: 'STOCK_ADJUSTED',
@@ -2422,14 +2439,22 @@ apiApp.post('/api/purchases/:id/receive', requireAuth, async (req: AuthRequest, 
         notes: `Purchase Receipt for ${purchase[0].purchaseNumber} (${item.quantity} ${item.purchaseUnit})`,
       });
 
-      // Update weighted average cost of material
+      // Update weighted average cost and conversion factor of material from supplier receipt
       const oldUnitCost = parseFloat(mat.unitCostDzd || '0');
       const newUnitCost = parseFloat(item.unitCostDzd || '0');
       const updatedCost = oldUnitCost > 0 ? ((oldUnitCost + newUnitCost) / 2).toFixed(2) : newUnitCost.toFixed(2);
 
+      const recPcs = parseFloat(item.receivedPieces || '0');
+      const recKg = parseFloat(item.receivedKg || (item.purchaseUnit === 'kg' ? item.quantity : '0'));
+      const matUpdates: any = { unitCostDzd: String(updatedCost) };
+
+      if (recPcs > 0 && recKg > 0) {
+        matUpdates.piecesPerKg = (recPcs / recKg).toFixed(2);
+      }
+
       await db
         .update(materials)
-        .set({ unitCostDzd: String(updatedCost) })
+        .set(matUpdates)
         .where(eq(materials.id, item.materialId));
     }
 
@@ -2984,6 +3009,16 @@ apiApp.patch('/api/orders/:id/status', requireAuth, async (req: AuthRequest, res
     const oldLabel = statusLabels[oldStatus] || oldStatus;
     const newLabel = statusLabels[status] || status;
 
+    // Record undo operation for order status change
+    await recordUndoOperation({
+      actionType: 'update',
+      entityType: 'order',
+      entityId: req.params.id,
+      description: `Changement de statut commande ${currentOrder[0].orderNumber} ("${oldLabel}" → "${newLabel}")`,
+      snapshot: { order: currentOrder[0] },
+      req,
+    });
+
     await db.insert(orderLogs).values({
       id: genId(),
       orderId: req.params.id,
@@ -2992,6 +3027,13 @@ apiApp.patch('/api/orders/:id/status', requireAuth, async (req: AuthRequest, res
       userRole: effectiveRole,
       action: 'Status Change',
       modification: `Order status changed from "${oldLabel}" to "${newLabel}"${modificationNotes ? ` - Reason: ${modificationNotes}` : ''}.`,
+    });
+
+    notifyDataMutation();
+    broadcastRealtimeEvent({
+      type: 'ORDER_STATUS_UPDATED',
+      entity: 'orders',
+      data: updated[0],
     });
 
     res.json(updated[0]);
@@ -3936,7 +3978,7 @@ apiApp.get('/api/reports/dashboard', async (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
-// 17. Global Undo System (Rollback for latest 10 operations)
+// 17. Global Undo System (Rollback for latest operations)
 // -------------------------------------------------------------
 apiApp.get('/api/undo/history', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
@@ -3945,7 +3987,7 @@ apiApp.get('/api/undo/history', requireAuth, async (req: AuthRequest, res: Respo
       .select()
       .from(undoOperations)
       .orderBy(desc(undoOperations.timestamp))
-      .limit(10);
+      .limit(100);
     res.json(list);
   } catch (error: any) {
     console.error('Failed to get undo history:', error);
@@ -4469,6 +4511,11 @@ apiApp.post('/api/undo/:id', requireAuth, requireOwnerOrAdmin, async (req: AuthR
       }
     }
 
+    // 9. Stock movement rollback (revert manual adjustment)
+    else if (op.entityType === 'stock_movement') {
+      await db.delete(stockMovements).where(eq(stockMovements.id, op.entityId));
+    }
+
     // Mark operation as undone
     await db
       .update(undoOperations)
@@ -4681,6 +4728,10 @@ apiApp.post('/api/undo/latest', requireAuth, requireOwnerOrAdmin, async (req: Au
           await db.insert(productionUsage).values(pu).onConflictDoNothing();
         }
       }
+    }
+    // Stock movement rollback
+    else if (op.entityType === 'stock_movement') {
+      await db.delete(stockMovements).where(eq(stockMovements.id, op.entityId));
     }
 
     // Mark as undone

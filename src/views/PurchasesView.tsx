@@ -102,6 +102,10 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
   const [purchaseToDelete, setPurchaseToDelete] = useState<Purchase | null>(null);
   const [isDeletingPurchase, setIsDeletingPurchase] = useState<boolean>(false);
 
+  // Delete Supplier Confirmation State
+  const [supplierToDelete, setSupplierToDelete] = useState<Supplier | null>(null);
+  const [isDeletingSupplier, setIsDeletingSupplier] = useState<boolean>(false);
+
   // Purchase Audit Logs Modal State
   const [selectedPurchaseForLogs, setSelectedPurchaseForLogs] = useState<Purchase | null>(null);
   const [isLogsModalOpen, setIsLogsModalOpen] = useState<boolean>(false);
@@ -206,14 +210,15 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
       return;
     }
     const firstMat = materials[0];
+    const defaultPcsPerKg = parseFloat(firstMat.piecesPerKg || '0') > 0 ? parseFloat(firstMat.piecesPerKg) : 50;
     setItems([
       {
         materialId: firstMat.id,
         quantity: '50',
         purchaseUnit: firstMat.purchaseUnit,
         receivedKg: firstMat.purchaseUnit === 'kg' ? '50' : '0',
-        receivedPieces: firstMat.piecesPerKg ? String(parseFloat(firstMat.piecesPerKg) * 50) : '0',
-        unitCostDzd: firstMat.unitCostDzd || '0',
+        receivedPieces: firstMat.trackingMode === 'dual_kg_units' ? String(50 * defaultPcsPerKg) : '0',
+        unitCostDzd: parseFloat(firstMat.unitCostDzd || '0') > 0 ? firstMat.unitCostDzd : '7',
       },
     ]);
     setIsAddPurchaseModalOpen(true);
@@ -221,15 +226,16 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
 
   const handleAddItemLine = () => {
     const firstMat = materials[0];
+    const defaultPcsPerKg = parseFloat(firstMat.piecesPerKg || '0') > 0 ? parseFloat(firstMat.piecesPerKg) : 50;
     setItems([
       ...items,
       {
         materialId: firstMat.id,
         quantity: '50',
         purchaseUnit: firstMat.purchaseUnit,
-        receivedKg: '50',
-        receivedPieces: '0',
-        unitCostDzd: firstMat.unitCostDzd || '0',
+        receivedKg: firstMat.purchaseUnit === 'kg' ? '50' : '0',
+        receivedPieces: firstMat.trackingMode === 'dual_kg_units' ? String(50 * defaultPcsPerKg) : '0',
+        unitCostDzd: parseFloat(firstMat.unitCostDzd || '0') > 0 ? firstMat.unitCostDzd : '7',
       },
     ]);
   };
@@ -244,25 +250,59 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
     const target = updated[index];
     (target as any)[field] = value;
 
+    const mat = materials.find((m) => m.id === target.materialId);
+
     if (field === 'materialId') {
-      const mat = materials.find((m) => m.id === value);
-      if (mat) {
-        target.purchaseUnit = mat.purchaseUnit;
-        target.unitCostDzd = mat.unitCostDzd;
+      const selected = materials.find((m) => m.id === value);
+      if (selected) {
+        target.purchaseUnit = selected.purchaseUnit;
+        if (parseFloat(selected.unitCostDzd || '0') > 0) {
+          target.unitCostDzd = selected.unitCostDzd;
+        }
         const qty = parseFloat(target.quantity || '0');
-        if (mat.trackingMode === 'dual_kg_units' && mat.piecesPerKg) {
+        const defaultRate = parseFloat(selected.piecesPerKg || '0') > 0 ? parseFloat(selected.piecesPerKg) : 50;
+        if (selected.trackingMode === 'dual_kg_units') {
           target.receivedKg = String(qty);
-          target.receivedPieces = String(Math.round(qty * parseFloat(mat.piecesPerKg)));
+          target.receivedPieces = String(Math.round(qty * defaultRate));
         }
       }
     }
 
     if (field === 'quantity') {
-      const mat = materials.find((m) => m.id === target.materialId);
-      if (mat && mat.trackingMode === 'dual_kg_units' && mat.piecesPerKg) {
-        const qty = parseFloat(value || '0');
+      const qty = parseFloat(value || '0');
+      if (mat && mat.trackingMode === 'dual_kg_units') {
+        const curKg = parseFloat(target.receivedKg || '0');
+        const curPcs = parseFloat(target.receivedPieces || '0');
+        const effectiveRate = curKg > 0 && curPcs > 0 ? (curPcs / curKg) : (parseFloat(mat.piecesPerKg || '0') > 0 ? parseFloat(mat.piecesPerKg) : 50);
         target.receivedKg = String(qty);
-        target.receivedPieces = String(Math.round(qty * parseFloat(mat.piecesPerKg)));
+        target.receivedPieces = String(Math.round(qty * effectiveRate));
+      }
+    }
+
+    if (field === 'supplierPiecesPerKg') {
+      const rate = parseFloat(value || '0');
+      const qty = parseFloat(target.quantity || '0');
+      if (rate > 0 && qty > 0) {
+        target.receivedKg = String(qty);
+        target.receivedPieces = String(Math.round(qty * rate));
+      }
+    }
+
+    if (field === 'gramPerPiece') {
+      const grams = parseFloat(value || '0');
+      const qty = parseFloat(target.quantity || '0');
+      if (grams > 0 && qty > 0) {
+        const rate = 1000 / grams;
+        target.receivedKg = String(qty);
+        target.receivedPieces = String(Math.round(qty * rate));
+      }
+    }
+
+    if (field === 'receivedPieces') {
+      target.receivedPieces = value;
+      const qty = parseFloat(target.quantity || '0');
+      if (qty > 0) {
+        target.receivedKg = String(qty);
       }
     }
 
@@ -371,29 +411,35 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
     }
   };
 
-  const handleDeleteSupplier = async (supplier: Supplier) => {
-    if (!window.confirm(`Confirmez-vous la suppression du fournisseur "${supplier.name}" (${supplier.code}) ? Cette action peut être annulée immédiatement via l'option Undo (Annuler).`)) {
-      return;
-    }
+  const handleDeleteSupplier = (supplier: Supplier) => {
+    setSupplierToDelete(supplier);
+  };
+
+  const handleConfirmDeleteSupplier = async () => {
+    if (!supplierToDelete) return;
     try {
-      const res = await api.deleteSupplier(supplier.id, token);
-      showUndoToast(supplier.id, `Fournisseur "${supplier.name}" supprimé`);
+      setIsDeletingSupplier(true);
+      const res = await api.deleteSupplier(supplierToDelete.id, token);
+      showUndoToast(supplierToDelete.id, `Fournisseur "${supplierToDelete.name}" supprimé`);
       setFeedbackBanner({
         type: 'success',
-        message: res.message || `Fournisseur "${supplier.name}" supprimé. Cliquez sur "Annuler" pour restaurer.`,
+        message: res.message || `Fournisseur "${supplierToDelete.name}" supprimé. Cliquez sur "Annuler" pour restaurer.`,
       });
       setTimeout(() => setFeedbackBanner(null), 5000);
+      setSupplierToDelete(null);
       await loadData();
     } catch (err: any) {
-      alert(err.message || 'Erreur lors de la suppression du fournisseur');
+      setFeedbackBanner({
+        type: 'error',
+        message: err.message || 'Erreur lors de la suppression du fournisseur',
+      });
+    } finally {
+      setIsDeletingSupplier(false);
     }
   };
 
   const handleDeleteAllSuppliers = async () => {
     if (suppliers.length === 0) return;
-    if (!window.confirm(`ATTENTION : Confirmez-vous la suppression de TOUS les fournisseurs (${suppliers.length} fournisseur(s)) ? Vos données pourront être restaurées grâce au système d'Annulation (Undo).`)) {
-      return;
-    }
     try {
       setLoading(true);
       const res = await api.deleteAllSuppliers(token);
@@ -405,7 +451,10 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
       setTimeout(() => setFeedbackBanner(null), 6000);
       await loadData();
     } catch (err: any) {
-      alert(err.message || 'Erreur lors de la suppression de tous les fournisseurs');
+      setFeedbackBanner({
+        type: 'error',
+        message: err.message || 'Erreur lors de la suppression de tous les fournisseurs',
+      });
     } finally {
       setLoading(false);
     }
@@ -451,25 +500,59 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
     const target = { ...updated[index], [field]: value };
     updated[index] = target;
 
+    const mat = materials.find((m) => m.id === target.materialId);
+
     if (field === 'materialId') {
-      const mat = materials.find((m) => m.id === value);
-      if (mat) {
-        target.purchaseUnit = mat.purchaseUnit;
-        target.unitCostDzd = mat.unitCostDzd || '0';
-        if (mat.trackingMode === 'dual_kg_units' && mat.piecesPerKg) {
-          const qty = parseFloat(target.quantity || '0');
+      const selected = materials.find((m) => m.id === value);
+      if (selected) {
+        target.purchaseUnit = selected.purchaseUnit;
+        if (parseFloat(selected.unitCostDzd || '0') > 0) {
+          target.unitCostDzd = selected.unitCostDzd;
+        }
+        const qty = parseFloat(target.quantity || '0');
+        const defaultRate = parseFloat(selected.piecesPerKg || '0') > 0 ? parseFloat(selected.piecesPerKg) : 50;
+        if (selected.trackingMode === 'dual_kg_units') {
           target.receivedKg = String(qty);
-          target.receivedPieces = String(Math.round(qty * parseFloat(mat.piecesPerKg)));
+          target.receivedPieces = String(Math.round(qty * defaultRate));
         }
       }
     }
 
     if (field === 'quantity') {
-      const mat = materials.find((m) => m.id === target.materialId);
-      if (mat && mat.trackingMode === 'dual_kg_units' && mat.piecesPerKg) {
-        const qty = parseFloat(value || '0');
+      const qty = parseFloat(value || '0');
+      if (mat && mat.trackingMode === 'dual_kg_units') {
+        const curKg = parseFloat(target.receivedKg || '0');
+        const curPcs = parseFloat(target.receivedPieces || '0');
+        const effectiveRate = curKg > 0 && curPcs > 0 ? (curPcs / curKg) : (parseFloat(mat.piecesPerKg || '0') > 0 ? parseFloat(mat.piecesPerKg) : 50);
         target.receivedKg = String(qty);
-        target.receivedPieces = String(Math.round(qty * parseFloat(mat.piecesPerKg)));
+        target.receivedPieces = String(Math.round(qty * effectiveRate));
+      }
+    }
+
+    if (field === 'supplierPiecesPerKg') {
+      const rate = parseFloat(value || '0');
+      const qty = parseFloat(target.quantity || '0');
+      if (rate > 0 && qty > 0) {
+        target.receivedKg = String(qty);
+        target.receivedPieces = String(Math.round(qty * rate));
+      }
+    }
+
+    if (field === 'gramPerPiece') {
+      const grams = parseFloat(value || '0');
+      const qty = parseFloat(target.quantity || '0');
+      if (grams > 0 && qty > 0) {
+        const rate = 1000 / grams;
+        target.receivedKg = String(qty);
+        target.receivedPieces = String(Math.round(qty * rate));
+      }
+    }
+
+    if (field === 'receivedPieces') {
+      target.receivedPieces = value;
+      const qty = parseFloat(target.quantity || '0');
+      if (qty > 0) {
+        target.receivedKg = String(qty);
       }
     }
 
@@ -482,6 +565,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
       return;
     }
     const firstMat = materials[0];
+    const defaultPcsPerKg = parseFloat(firstMat.piecesPerKg || '0') > 0 ? parseFloat(firstMat.piecesPerKg) : 50;
     setEditPurchaseForm({
       ...editPurchaseForm,
       items: [
@@ -491,8 +575,8 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
           quantity: '50',
           purchaseUnit: firstMat.purchaseUnit,
           receivedKg: firstMat.purchaseUnit === 'kg' ? '50' : '0',
-          receivedPieces: firstMat.piecesPerKg ? String(parseFloat(firstMat.piecesPerKg) * 50) : '0',
-          unitCostDzd: firstMat.unitCostDzd || '0',
+          receivedPieces: firstMat.trackingMode === 'dual_kg_units' ? String(50 * defaultPcsPerKg) : '0',
+          unitCostDzd: parseFloat(firstMat.unitCostDzd || '0') > 0 ? firstMat.unitCostDzd : '7',
         },
       ],
     });
@@ -1310,13 +1394,93 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
                     </div>
 
                     {isDual && (
-                      <div className="pt-2 border-t border-slate-100 flex items-center gap-4 text-[11px] text-indigo-900 bg-indigo-50/40 p-2 rounded">
-                        <span>
-                          <strong>Dual Tracking Conversion:</strong> {it.receivedKg} kg ≈ {it.receivedPieces} pieces
-                        </span>
-                        <span className="text-[10px] text-slate-500">
-                          (Based on {mat?.piecesPerKg} pcs/kg for {mat?.name})
-                        </span>
+                      <div className="pt-2 border-t border-slate-100 bg-indigo-50/60 p-2.5 rounded-lg space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold text-indigo-900 flex items-center gap-1.5">
+                            <span>📦 Spécification de livraison fournisseur (Sacs)</span>
+                          </span>
+                          <span className="text-[10px] text-indigo-700 font-mono">
+                            {parseFloat(it.receivedKg || '0') > 0 && parseFloat(it.receivedPieces || '0') > 0 ? (
+                              <span>
+                                ≈ {(parseFloat(it.receivedPieces) / parseFloat(it.receivedKg)).toFixed(1)} pcs/kg • {(1000 / (parseFloat(it.receivedPieces) / parseFloat(it.receivedKg))).toFixed(1)}g / pièce
+                              </span>
+                            ) : null}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <div>
+                            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                              Poids par pièce (ex: 12g ou 20g)
+                            </label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                step="0.1"
+                                placeholder="ex: 14.3"
+                                value={
+                                  parseFloat(it.receivedKg || '0') > 0 && parseFloat(it.receivedPieces || '0') > 0
+                                    ? (1000 / (parseFloat(it.receivedPieces) / parseFloat(it.receivedKg))).toFixed(1)
+                                    : ''
+                                }
+                                onChange={(e) => handleItemChange(idx, 'gramPerPiece', e.target.value)}
+                                className="w-full rounded border border-slate-300 bg-white p-1 text-xs font-mono font-bold"
+                              />
+                              <span className="text-[10px] text-slate-500 font-bold">g</span>
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                              Rendement (ex: 50 ou 70 pcs/kg)
+                            </label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                step="0.1"
+                                placeholder="ex: 70"
+                                value={
+                                  parseFloat(it.receivedKg || '0') > 0 && parseFloat(it.receivedPieces || '0') > 0
+                                    ? (parseFloat(it.receivedPieces) / parseFloat(it.receivedKg)).toFixed(1)
+                                    : ''
+                                }
+                                onChange={(e) => handleItemChange(idx, 'supplierPiecesPerKg', e.target.value)}
+                                className="w-full rounded border border-slate-300 bg-white p-1 text-xs font-mono font-bold"
+                              />
+                              <span className="text-[10px] text-slate-500 font-bold">pcs/kg</span>
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                              Total Pièces Reçues en Stock
+                            </label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                step="1"
+                                placeholder="ex: 3500"
+                                value={it.receivedPieces}
+                                onChange={(e) => handleItemChange(idx, 'receivedPieces', e.target.value)}
+                                className="w-full rounded border border-slate-300 bg-white p-1 text-xs font-mono font-bold text-indigo-700"
+                              />
+                              <span className="text-[10px] text-slate-500 font-bold">pcs</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {parseFloat(it.receivedPieces || '0') > 0 && (
+                          <div className="text-[10px] text-indigo-800 flex items-center justify-between pt-1 border-t border-indigo-100">
+                            <span>
+                              Arrivage : <strong>{it.quantity} kg</strong> livrés = <strong>{it.receivedPieces} sacs</strong> ajoutés au stock
+                            </span>
+                            <span>
+                              Coût réel unitaire : <strong>
+                                {((parseFloat(it.quantity || '0') * parseFloat(it.unitCostDzd || '0')) / parseFloat(it.receivedPieces)).toFixed(2)} DZD/sac
+                              </strong>
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1939,70 +2103,147 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
               <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
                 {editPurchaseForm.items.map((it, idx) => {
                   const lineTotal = (parseFloat(it.quantity || '0') * parseFloat(it.unitCostDzd || '0')).toFixed(2);
+                  const mat = materials.find((m) => m.id === it.materialId);
+                  const isDual = mat?.trackingMode === 'dual_kg_units';
+
                   return (
                     <div
                       key={idx}
-                      className="grid grid-cols-12 gap-2 items-center rounded-xl border border-slate-200 bg-slate-50/70 p-2 text-xs"
+                      className="flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2.5 text-xs"
                     >
-                      <div className="col-span-4">
-                        <select
-                          value={it.materialId}
-                          onChange={(e) => handleEditItemChange(idx, 'materialId', e.target.value)}
-                          className="w-full rounded-lg border border-slate-300 bg-white p-2 text-xs font-semibold"
-                        >
-                          {materials.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.name} ({m.purchaseUnit})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                      <div className="grid grid-cols-12 gap-2 items-center">
+                        <div className="col-span-4">
+                          <select
+                            value={it.materialId}
+                            onChange={(e) => handleEditItemChange(idx, 'materialId', e.target.value)}
+                            className="w-full rounded-lg border border-slate-300 bg-white p-2 text-xs font-semibold"
+                          >
+                            {materials.map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.name} ({m.purchaseUnit})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
 
-                      <div className="col-span-3">
-                        <div className="flex items-center gap-1">
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0.01"
-                            required
-                            placeholder="Quantité"
-                            value={it.quantity}
-                            onChange={(e) => handleEditItemChange(idx, 'quantity', e.target.value)}
-                            className="w-full rounded-lg border border-slate-300 bg-white p-2 text-xs font-bold"
-                          />
-                          <span className="text-[11px] font-bold text-slate-400">{it.purchaseUnit}</span>
+                        <div className="col-span-3">
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0.01"
+                              required
+                              placeholder="Quantité"
+                              value={it.quantity}
+                              onChange={(e) => handleEditItemChange(idx, 'quantity', e.target.value)}
+                              className="w-full rounded-lg border border-slate-300 bg-white p-2 text-xs font-bold"
+                            />
+                            <span className="text-[11px] font-bold text-slate-400">{it.purchaseUnit}</span>
+                          </div>
+                        </div>
+
+                        <div className="col-span-3">
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              required
+                              placeholder="Prix unit."
+                              value={it.unitCostDzd}
+                              onChange={(e) => handleEditItemChange(idx, 'unitCostDzd', e.target.value)}
+                              className="w-full rounded-lg border border-slate-300 bg-white p-2 text-xs font-bold"
+                            />
+                            <span className="text-[10px] text-slate-400 font-mono">DZD</span>
+                          </div>
+                        </div>
+
+                        <div className="col-span-2 flex items-center justify-between">
+                          <span className="font-mono font-bold text-[11px] text-slate-900 truncate">
+                            {formatDZD(lineTotal)}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveEditItem(idx)}
+                            className="text-slate-400 hover:text-rose-600 p-1 rounded"
+                            title="Supprimer la ligne"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
                         </div>
                       </div>
 
-                      <div className="col-span-3">
-                        <div className="flex items-center gap-1">
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            required
-                            placeholder="Prix unit."
-                            value={it.unitCostDzd}
-                            onChange={(e) => handleEditItemChange(idx, 'unitCostDzd', e.target.value)}
-                            className="w-full rounded-lg border border-slate-300 bg-white p-2 text-xs font-bold"
-                          />
-                          <span className="text-[10px] text-slate-400 font-mono">DZD</span>
-                        </div>
-                      </div>
+                      {isDual && (
+                        <div className="pt-2 border-t border-slate-200/60 bg-indigo-50/50 p-2 rounded-lg space-y-1.5 text-xs">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-bold text-indigo-900">
+                              📦 Livraison Sacs (Qualité Fournisseur)
+                            </span>
+                            <span className="text-[10px] text-indigo-700 font-mono">
+                              {parseFloat(it.receivedKg || '0') > 0 && parseFloat(it.receivedPieces || '0') > 0 ? (
+                                <span>
+                                  ≈ {(parseFloat(it.receivedPieces) / parseFloat(it.receivedKg)).toFixed(1)} pcs/kg • {(1000 / (parseFloat(it.receivedPieces) / parseFloat(it.receivedKg))).toFixed(1)}g / sac
+                                </span>
+                              ) : null}
+                            </span>
+                          </div>
 
-                      <div className="col-span-2 flex items-center justify-between">
-                        <span className="font-mono font-bold text-[11px] text-slate-900 truncate">
-                          {formatDZD(lineTotal)}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveEditItem(idx)}
-                          className="text-slate-400 hover:text-rose-600 p-1 rounded"
-                          title="Supprimer la ligne"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
+                          <div className="grid grid-cols-3 gap-2">
+                            <div>
+                              <label className="text-[9px] font-semibold text-slate-500 block">Poids/pièce</label>
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  step="0.1"
+                                  placeholder="14.3"
+                                  value={
+                                    parseFloat(it.receivedKg || '0') > 0 && parseFloat(it.receivedPieces || '0') > 0
+                                      ? (1000 / (parseFloat(it.receivedPieces) / parseFloat(it.receivedKg))).toFixed(1)
+                                      : ''
+                                  }
+                                  onChange={(e) => handleEditItemChange(idx, 'gramPerPiece', e.target.value)}
+                                  className="w-full rounded border border-slate-300 bg-white p-1 text-[11px] font-mono font-bold"
+                                />
+                                <span className="text-[9px] text-slate-400 font-bold">g</span>
+                              </div>
+                            </div>
+
+                            <div>
+                              <label className="text-[9px] font-semibold text-slate-500 block">Rendement</label>
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  step="0.1"
+                                  placeholder="70"
+                                  value={
+                                    parseFloat(it.receivedKg || '0') > 0 && parseFloat(it.receivedPieces || '0') > 0
+                                      ? (parseFloat(it.receivedPieces) / parseFloat(it.receivedKg)).toFixed(1)
+                                      : ''
+                                  }
+                                  onChange={(e) => handleEditItemChange(idx, 'supplierPiecesPerKg', e.target.value)}
+                                  className="w-full rounded border border-slate-300 bg-white p-1 text-[11px] font-mono font-bold"
+                                />
+                                <span className="text-[9px] text-slate-400 font-bold">pcs/kg</span>
+                              </div>
+                            </div>
+
+                            <div>
+                              <label className="text-[9px] font-semibold text-slate-500 block">Total Pièces</label>
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  step="1"
+                                  placeholder="3500"
+                                  value={it.receivedPieces}
+                                  onChange={(e) => handleEditItemChange(idx, 'receivedPieces', e.target.value)}
+                                  className="w-full rounded border border-slate-300 bg-white p-1 text-[11px] font-mono font-bold text-indigo-700"
+                                />
+                                <span className="text-[9px] text-slate-400 font-bold">pcs</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -2230,6 +2471,48 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab = 'purc
                 className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200 transition"
               >
                 Fermer
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Delete Supplier Confirmation Modal (Zero window.confirm) */}
+      <Modal
+        isOpen={!!supplierToDelete}
+        onClose={() => setSupplierToDelete(null)}
+        title={`Supprimer le Fournisseur : ${supplierToDelete?.name || ''}`}
+        maxWidth="md"
+      >
+        {supplierToDelete && (
+          <div className="space-y-4">
+            <div className="rounded-xl p-3.5 bg-rose-50 border border-rose-200 text-rose-900 text-xs space-y-1">
+              <div className="flex items-center gap-2 font-bold text-rose-800">
+                <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
+                <span>Confirmation de suppression</span>
+              </div>
+              <p className="text-[11px] text-rose-700">
+                Êtes-vous sûr de vouloir supprimer le fournisseur <strong>{supplierToDelete.name}</strong> ({supplierToDelete.code}) ? Cette opération peut être immédiatement annulée via l'historique d'annulation (Undo).
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={() => setSupplierToDelete(null)}
+                disabled={isDeletingSupplier}
+                className="px-4 py-2.5 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteSupplier}
+                disabled={isDeletingSupplier}
+                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-rose-600 text-white hover:bg-rose-700 shadow-sm transition disabled:opacity-50"
+              >
+                <Trash2 className="h-4 w-4" />
+                <span>{isDeletingSupplier ? 'Suppression...' : 'Confirmer la Suppression'}</span>
               </button>
             </div>
           </div>

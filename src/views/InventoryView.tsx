@@ -91,11 +91,11 @@ export const InventoryView: React.FC = () => {
     trackingMode: 'dual_kg_units' as TrackingMode,
     purchaseUnit: 'kg',
     stockUnit: 'piece',
-    piecesPerKg: '72',
-    reorderThreshold: '500',
-    unitCostDzd: '6.5',
-    openingStockKg: '50',
-    openingStockPieces: '3600',
+    piecesPerKg: '0',
+    reorderThreshold: '300',
+    unitCostDzd: '0',
+    openingStockKg: '0',
+    openingStockPieces: '0',
     isActive: true,
   });
 
@@ -144,11 +144,11 @@ export const InventoryView: React.FC = () => {
       trackingMode: 'dual_kg_units',
       purchaseUnit: 'kg',
       stockUnit: 'piece',
-      piecesPerKg: '70',
-      reorderThreshold: '300',
-      unitCostDzd: '7.5',
-      openingStockKg: '20',
-      openingStockPieces: '1400',
+      piecesPerKg: '0',
+      reorderThreshold: '200',
+      unitCostDzd: '0',
+      openingStockKg: '0',
+      openingStockPieces: '0',
       isActive: true,
     });
     setIsAddModalOpen(true);
@@ -191,7 +191,28 @@ export const InventoryView: React.FC = () => {
   const handleSubmitAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await api.createMaterial(formData, token);
+      const isBagCategory = ['blank_plastic', 'blank_carton', 'blank_tnt'].includes(formData.category);
+      const stockUnit = isBagCategory ? 'piece' : (['ink', 'diluent', 'retarder'].includes(formData.category) ? 'kg' : 'piece');
+      const purchaseUnit = ['ink', 'diluent', 'retarder'].includes(formData.category) ? 'kg' : (isBagCategory ? 'kg' : 'piece');
+      const trackingMode = isBagCategory ? 'dual_kg_units' : 'units';
+
+      await api.createMaterial(
+        {
+          code: formData.code.trim(),
+          name: formData.name.trim(),
+          category: formData.category,
+          description: formData.description.trim(),
+          trackingMode,
+          purchaseUnit,
+          stockUnit,
+          piecesPerKg: '0',
+          reorderThreshold: formData.reorderThreshold || '100',
+          unitCostDzd: '0',
+          openingStockKg: '0',
+          openingStockPieces: '0',
+        },
+        token
+      );
       setIsAddModalOpen(false);
       setFeedbackBanner({
         type: 'success',
@@ -669,17 +690,27 @@ export const InventoryView: React.FC = () => {
                       <div className="font-black text-base text-slate-900">
                         {m.currentStock} {m.stockUnit}
                       </div>
-                      {m.trackingMode === 'dual_kg_units' && (
-                        <div className="text-[10px] text-slate-500">
-                          ≈ {m.stockKg} kg ({m.stockPieces} pcs)
-                        </div>
+                      {m.currentStock === 0 ? (
+                        <span className="text-[10px] text-slate-400 block">En attente d'achat</span>
+                      ) : (
+                        m.trackingMode === 'dual_kg_units' && (
+                          <div className="text-[10px] text-slate-500">
+                            {parseFloat(m.piecesPerKg || '0') > 0
+                              ? `≈ ${m.stockKg} kg (${m.stockPieces} pcs)`
+                              : 'Selon arrivage'}
+                          </div>
+                        )
                       )}
                     </div>
                   </div>
 
                   <div className="flex items-center justify-between text-xs pt-2 border-t border-slate-100">
                     <span className="text-slate-500">
-                      Unit Cost: <strong className="text-slate-800">{formatDZD(m.unitCostDzd)}</strong>
+                      Coût : {parseFloat(m.unitCostDzd || '0') > 0 ? (
+                        <strong className="text-slate-800">{formatDZD(m.unitCostDzd)}</strong>
+                      ) : (
+                        <span className="italic text-slate-400">Selon facture</span>
+                      )}
                     </span>
                     <div className="flex items-center gap-2">
                       {isOwner && (
@@ -745,20 +776,44 @@ export const InventoryView: React.FC = () => {
                             {categoryLabels[m.category] || m.category}
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-right font-black text-slate-900 text-sm">
-                          {m.currentStock} {m.stockUnit}
+                        <td className="py-3 px-4 text-right">
+                          <div className="font-black text-slate-900 text-sm">
+                            {m.currentStock} {m.stockUnit}
+                          </div>
+                          {m.currentStock === 0 && (
+                            <span className="inline-block mt-0.5 text-[10px] font-semibold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                              En attente d'achat
+                            </span>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-right text-slate-600 font-mono">
                           {m.trackingMode === 'dual_kg_units' ? (
-                            <span>
-                              {m.stockKg} kg ({m.stockPieces} pcs)
-                            </span>
+                            parseFloat(m.piecesPerKg || '0') > 0 ? (
+                              <div>
+                                <span className="font-bold text-slate-800">
+                                  {m.stockKg} kg ({m.stockPieces} pcs)
+                                </span>
+                                <div className="text-[10px] text-slate-400">
+                                  {m.piecesPerKg} pcs/kg
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 text-[11px] italic">
+                                Selon arrivage fournisseur
+                              </span>
+                            )
                           ) : (
                             <span className="text-slate-400">—</span>
                           )}
                         </td>
                         <td className="py-3 px-4 text-right font-medium text-slate-800">
-                          {formatDZD(m.unitCostDzd)}
+                          {parseFloat(m.unitCostDzd || '0') > 0 ? (
+                            <span className="font-bold">{formatDZD(m.unitCostDzd)}</span>
+                          ) : (
+                            <span className="text-slate-400 text-[11px] italic">
+                              Selon facture fournisseur
+                            </span>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-center">
                           <span className="rounded bg-slate-100 px-2 py-0.5 text-[11px] font-mono text-slate-700">
@@ -1297,84 +1352,35 @@ export const InventoryView: React.FC = () => {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Tracking Mode</label>
-              <select
-                value={formData.trackingMode}
-                onChange={(e) => setFormData({ ...formData, trackingMode: e.target.value as any })}
-                className="w-full rounded-lg border border-slate-300 p-2 text-xs"
-              >
-                <option value="dual_kg_units">Dual Tracking (Purchased Kg / Stocked Pieces)</option>
-                <option value="single_unit">Single Unit</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Pieces per Kg</label>
-              <input
-                type="number"
-                step="0.01"
-                value={formData.piecesPerKg}
-                onChange={(e) => setFormData({ ...formData, piecesPerKg: e.target.value })}
-                className="w-full rounded-lg border border-slate-300 p-2 text-xs font-mono"
-                placeholder="70"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Stock Unit</label>
-              <input
-                type="text"
-                value={formData.stockUnit}
-                onChange={(e) => setFormData({ ...formData, stockUnit: e.target.value })}
-                className="w-full rounded-lg border border-slate-300 p-2 text-xs"
-                placeholder="piece, kg, liter"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Unit Cost (DZD)</label>
-              <input
-                type="number"
-                step="0.01"
-                value={formData.unitCostDzd}
-                onChange={(e) => setFormData({ ...formData, unitCostDzd: e.target.value })}
-                className="w-full rounded-lg border border-slate-300 p-2 text-xs font-mono"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Initial Opening Stock (Kg)</label>
-              <input
-                type="number"
-                step="0.01"
-                value={formData.openingStockKg}
-                onChange={(e) => setFormData({ ...formData, openingStockKg: e.target.value })}
-                className="w-full rounded-lg border border-slate-300 p-2 text-xs font-mono"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Initial Opening Stock (Pieces)</label>
-              <input
-                type="number"
-                value={formData.openingStockPieces}
-                onChange={(e) => setFormData({ ...formData, openingStockPieces: e.target.value })}
-                className="w-full rounded-lg border border-slate-300 p-2 text-xs font-mono"
-              />
-            </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Description / Notes techniques</label>
+            <input
+              type="text"
+              value={formData.description}
+              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+              className="w-full rounded-lg border border-slate-300 p-2 text-xs"
+              placeholder="ex: 12g ou 20g/pièce selon fournisseur, poignée découpée, transparent..."
+            />
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Reorder Low Stock Threshold</label>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Seuil d'alerte stock bas (Reorder Threshold)</label>
             <input
               type="number"
               value={formData.reorderThreshold}
               onChange={(e) => setFormData({ ...formData, reorderThreshold: e.target.value })}
               className="w-full rounded-lg border border-slate-300 p-2 text-xs font-mono"
+              placeholder="300"
             />
+          </div>
+
+          <div className="rounded-xl bg-blue-50/80 border border-blue-200 p-3 text-xs text-blue-900 space-y-1">
+            <div className="font-bold flex items-center gap-1.5 text-blue-800">
+              <span>💡 Arrivages & Spécifications Fournisseurs</span>
+            </div>
+            <p className="text-[11px] text-blue-700 leading-relaxed">
+              Le coût d'achat unitaire, le poids ou conversion par pièce (ex: 12g ou 20g par pièce selon chaque fournisseur) et les quantités en stock sont enregistrés directement lors de la réception des bons d'achat et des factures fournisseurs.
+            </p>
           </div>
 
           <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">

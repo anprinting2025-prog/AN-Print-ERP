@@ -1,11 +1,18 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useUndo } from '../../context/UndoContext.tsx';
 import { Modal } from './Modal.tsx';
 import { Badge } from './Badge.tsx';
-import { RotateCcw, History, Trash2, Edit3, CheckCircle2, User, Clock } from 'lucide-react';
+import { RotateCcw, History, Trash2, Edit3, CheckCircle2, User, Clock, RefreshCw } from 'lucide-react';
 
 export const UndoHistoryModal: React.FC = () => {
-  const { isUndoModalOpen, setIsUndoModalOpen, history, undoOperation, loading } = useUndo();
+  const { isUndoModalOpen, setIsUndoModalOpen, history, undoOperation, refreshHistory, loading } = useUndo();
+
+  // Re-fetch fresh history from server whenever the modal opens
+  useEffect(() => {
+    if (isUndoModalOpen) {
+      refreshHistory();
+    }
+  }, [isUndoModalOpen, refreshHistory]);
 
   const formatTime = (ts: string) => {
     try {
@@ -33,7 +40,7 @@ export const UndoHistoryModal: React.FC = () => {
     <Modal
       isOpen={isUndoModalOpen}
       onClose={() => setIsUndoModalOpen(false)}
-      title="Historique des 10 Dernières Opérations (Undo / Annulation)"
+      title="Historique des Opérations Récentes (Undo / Annulation)"
       maxWidth="2xl"
     >
       <div className="space-y-4">
@@ -43,12 +50,27 @@ export const UndoHistoryModal: React.FC = () => {
               <History className="h-4 w-4" />
             </div>
             <div>
-              <div className="font-bold text-slate-900">Annulation Immédiate (Dernières 10 opérations)</div>
+              <div className="font-bold text-slate-900 flex items-center gap-2">
+                <span>Journal d'annulation & de restauration</span>
+                <span className="rounded-full bg-indigo-100 text-indigo-800 px-2 py-0.5 text-[10px] font-bold">
+                  {history.length} action(s)
+                </span>
+              </div>
               <div className="text-slate-500 text-[11px]">
-                Vous pouvez annuler toute modification ou suppression involontaire. Raccourci clavier : <kbd className="px-1 py-0.5 bg-slate-200 text-slate-800 rounded font-mono text-[10px]">Ctrl+Z</kbd>
+                Vous pouvez annuler toute modification ou suppression récente. Raccourci : <kbd className="px-1 py-0.5 bg-slate-200 text-slate-800 rounded font-mono text-[10px]">Ctrl+Z</kbd>
               </div>
             </div>
           </div>
+          <button
+            type="button"
+            onClick={() => refreshHistory()}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 shadow-2xs transition disabled:opacity-50"
+            title="Rafraîchir l'historique"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 text-indigo-600 ${loading ? 'animate-spin' : ''}`} />
+            <span>Actualiser</span>
+          </button>
         </div>
 
         {history.length === 0 ? (
